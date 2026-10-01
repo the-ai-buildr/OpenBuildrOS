@@ -18,6 +18,7 @@ import {
   checkHealth,
   continueRun,
   entityKey,
+  hasComputer,
   listChannels,
   listEntities,
   loadChannel,
@@ -29,6 +30,7 @@ import {
 import { applyEvents, newMessage, resolvePaused, type ChatMessage } from '@/lib/chat'
 
 import { ChatView } from './ChatView'
+import { ComputerPanel } from './ComputerPanel'
 import { CreateDialog } from './CreateDialog'
 import { RoutinesDialog } from './RoutinesDialog'
 import { Sidebar } from './Sidebar'
@@ -221,8 +223,10 @@ export function Workspace() {
     cancelRun(entityOf(key), runId).catch(() => abortRef.current?.abort())
   }
 
+  const showComputer = selected?.kind === 'agents' && hasComputer(selected)
+
   return (
-    <div className="shell">
+    <div className={`shell ${showComputer ? 'with-computer' : ''}`}>
       <Sidebar
         entities={entities}
         selectedKey={selectedKey}
@@ -246,6 +250,7 @@ export function Workspace() {
         onOpenChannel={(sessionId) => void openChannel(selectedKey, sessionId)}
         onNewChannel={() => startChannel(selectedKey)}
       />
+      {showComputer && selected && <ComputerPanel botId={selected.id} active={busyKey === selectedKey} />}
       {dialog === 'create' && (
         <CreateDialog
           agents={entities.filter((entity) => entity.kind === 'agents' && entity.is_component)}

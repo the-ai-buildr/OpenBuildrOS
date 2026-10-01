@@ -34,6 +34,33 @@ export interface Entity {
   /** True for components built at runtime with Studio; false for the code-defined admin agents. */
   is_component?: boolean
   model?: { model?: string; provider?: string }
+  tools?: { tools?: { name?: string }[] }
+}
+
+/** True when the agent was given its own computer (the registry's `computer` toolkit). */
+export function hasComputer(entity: Entity | undefined): boolean {
+  return Boolean(entity?.tools?.tools?.some((tool) => tool.name === 'browse' || tool.name === 'run_shell'))
+}
+
+/** One gateway decision about a computer action. */
+export interface AuditRow {
+  id: number
+  created_at: number
+  bot_id: string
+  tool: string
+  target?: string | null
+  decision: 'allowed' | 'denied' | 'failed'
+  rule?: string | null
+  detail?: string | null
+}
+
+/** URL of a bot's live screen; `nonce` defeats caching between refreshes. */
+export const screenUrl = (botId: string, nonce: number) =>
+  `${BASE}/computers/${encodeURIComponent(botId)}/screen?t=${nonce}`
+
+/** The bot's newest computer actions, newest first. */
+export function listAudit(botId: string, limit = 30): Promise<AuditRow[]> {
+  return json<AuditRow[]>(`/audit?${new URLSearchParams({ bot_id: botId, limit: String(limit) })}`)
 }
 
 /** Stable key for an entity across kinds, e.g. `teams:research-desk`. */

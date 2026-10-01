@@ -134,6 +134,39 @@ test('routines created by the Builder can be listed, run, and turned off', async
   await expect(row.getByRole('button', { name: 'Turn on' })).toBeVisible()
 })
 
+test('a bot gets its own computer: shell, browser, live screen, and an audit trail', async ({ page }) => {
+  const name = `Operator ${suffix()}`
+  await page.goto('/')
+  await create(page, 'Agent', name, ['computer'])
+  await page.getByRole('navigation', { name: 'Agents', exact: true }).getByText(name, { exact: true }).click()
+  const panel = page.getByRole('complementary', { name: 'Computer' })
+  await expect(panel).toBeVisible()
+
+  // The shell runs in this bot's own workspace, as an unprivileged user.
+  await sendMessage(page, 'SHELL: echo hello-from-computer > note.txt && cat note.txt && pwd')
+  const shell = lastReply(page).locator('.tool-done', { hasText: 'run_shell' })
+  await expect(shell).toBeVisible()
+  await shell.locator('summary').click()
+  await expect(shell).toContainText('hello-from-computer')
+  await expect(shell).toContainText(`/${idOf(name)}\\n`)
+  await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+
+  // The browser renders where the live screen can see it.
+  await sendMessage(page, 'BROWSE: data:text/html,<title>Screen test</title><h1>On screen</h1>')
+  await expect(lastReply(page).locator('.tool-done', { hasText: 'browse' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+  const screen = panel.getByRole('img')
+  await expect(screen).toBeVisible()
+  await expect.poll(() => screen.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0)
+
+  // The gateway refuses the deployment's own network before anything runs, and says why.
+  await sendMessage(page, 'BROWSE: http://localhost:8000/health')
+  await expect(lastReply(page)).toContainText('Refused by policy')
+  const activity = page.getByTestId('computer-activity')
+  await expect(activity.locator('.audit-denied').first()).toContainText('private network address')
+  await expect(activity.locator('.audit-allowed', { hasText: 'run_shell' })).toBeVisible()
+})
+
 test('a dropped stream reconnects and finishes without losing or repeating output', async ({ page }) => {
   const message = 'SLOW reconnect one two three four five'
   let cut = false

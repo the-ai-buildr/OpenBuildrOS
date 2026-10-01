@@ -60,7 +60,7 @@ def test_registry_exposes_buildable_tools(client: TestClient) -> None:
 
 def test_palette_lists_only_declared_tools(client: TestClient) -> None:
     names = [tool["name"] for tool in client.get("/palette").json()]
-    assert names == ["calculator", "websearch", "file_generation"]
+    assert names == ["calculator", "websearch", "file_generation", "computer"]
 
 
 def test_admin_agent_streams_a_reply(client: TestClient) -> None:

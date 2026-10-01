@@ -53,6 +53,13 @@ services:
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
       # Set to redis://redis:6379/0 (and start the "scale" profile) for WEB_CONCURRENCY > 1.
       REDIS_URL: ${REDIS_URL:-}
+      # Each bot's own computer (browser, workspace, shell): per-bot | shared | off.
+      COMPUTER_MODE: ${COMPUTER_MODE:-per-bot}
+      SUPERVISOR_URL: http://supervisor:8090
+      COMPUTER_URL: http://computer:8080
+      COMPUTER_TOKEN: ${COMPUTER_TOKEN:-}
+      SUPERVISOR_TOKEN: ${SUPERVISOR_TOKEN:-}
+      COMPUTER_POLICY: ${COMPUTER_POLICY:-}
     # Published on localhost only: the UI reaches it over the internal network.
     # Remove the mapping entirely if nothing outside the stack needs the API.
     ports:
@@ -60,10 +67,48 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    networks: [internal]
+      supervisor:
+        condition: service_healthy
+    # computers: reach the bots' computers (which cannot reach the database).
+    networks: [internal, computers]
     deploy:
       resources:
         limits: { cpus: "2", memory: 4g }
+
+  # Starts one computer container per bot from the computer image, on the
+  # "computers" network. The only service with the Docker socket.
+  supervisor:
+    build:
+      context: ./supervisor
+    image: openbuildros-supervisor:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      SUPERVISOR_TOKEN: ${SUPERVISOR_TOKEN:-}
+      COMPUTER_TOKEN: ${COMPUTER_TOKEN:-}
+      COMPUTER_IMAGE: openbuildros-computer:${IMAGE_TAG:-latest}
+      COMPUTER_NETWORK: openbuildros-computers
+      COMPUTER_MEMORY: ${COMPUTER_MEMORY:-2g}
+      COMPUTER_CPUS: ${COMPUTER_CPUS:-1}
+      COMPUTER_IDLE_MINUTES: ${COMPUTER_IDLE_MINUTES:-30}
+      # "runsc" runs computers under gVisor where the host has it.
+      COMPUTER_RUNTIME: ${COMPUTER_RUNTIME:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [computers]
+
+  # The computer image. Built by `make build`; started per bot by the supervisor,
+  # or as this single service with `--profile shared-computer` and COMPUTER_MODE=shared.
+  computer:
+    build:
+      context: ./computer
+    image: openbuildros-computer:${IMAGE_TAG:-latest}
+    profiles: [shared-computer]
+    restart: unless-stopped
+    environment:
+      COMPUTER_TOKEN: ${COMPUTER_TOKEN:-}
+    volumes:
+      - workspaces:/workspace
+    networks: [computers]
 
   web:
     build:
@@ -87,6 +132,10 @@ services:
 
 networks:
   internal:
+  # Bots' computers live here: internet egress, no route to the database.
+  computers:
+    name: openbuildros-computers
 
 volumes:
   pgdata:
+  workspaces:

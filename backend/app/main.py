@@ -28,11 +28,13 @@ from agno.os.event_streams import BaseEventStream
 from agno.os.interfaces.agui import AGUI
 from agno.os.settings import AgnoAPISettings
 from agno.tools import Toolkit
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Response
 
 from agents.builder import platform_builder
 from agents.engineer import platform_engineer
 from agents.manager import platform_manager
+from app import audit
+from app.computer import ComputerError, call_computer
 from app.db import get_db
 from app.registry import registry
 from app.settings import PRODUCT_NAME, get_settings
@@ -101,6 +103,28 @@ def palette() -> list[dict[str, str]]:
             doc = (type(tool).__doc__ if isinstance(tool, Toolkit) else tool.__doc__) or ""
             tools.append({"name": name, "description": doc.strip().split("\n")[0]})
     return tools
+
+
+@base_app.get("/computers/{bot_id}/screen", dependencies=[Depends(get_authentication_dependency(api_settings))])
+def computer_screen(bot_id: str) -> Response:
+    """A PNG of the bot's screen for the UI's live view. Never starts a stopped computer.
+
+    Raises:
+        HTTPException: 404 when computers are off or this bot's computer is not running.
+    """
+    if settings.computer_mode == "off":
+        raise HTTPException(status_code=404, detail="Computers are off in this deployment")
+    try:
+        png = call_computer(bot_id, "GET", "/browser/screenshot", start=False).content
+    except ComputerError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return Response(content=png, media_type="image/png", headers={"cache-control": "no-store"})
+
+
+@base_app.get("/audit", dependencies=[Depends(get_authentication_dependency(api_settings))])
+def audit_log(bot_id: str | None = None, limit: int = 50) -> list[dict]:
+    """The newest computer actions: what was allowed, refused (with the rule), and what failed."""
+    return audit.recent(bot_id=bot_id, limit=limit)
 
 
 agent_os = AgentOS(

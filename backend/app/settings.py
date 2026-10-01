@@ -66,6 +66,13 @@ class Settings:
             never saw the run.
         web_concurrency: uvicorn worker count (``WEB_CONCURRENCY``).
         agentos_url: This backend's own base URL; the scheduler calls it to fire scheduled runs.
+        computer_mode: ``off``, ``shared`` (one computer service), or ``per-bot`` (supervisor
+            starts one computer container per bot). See ``app/computer.py``.
+        computer_url: The shared computer service (``shared`` mode).
+        supervisor_url: The computer supervisor (``per-bot`` mode).
+        computer_token: Bearer token the computers require.
+        supervisor_token: Bearer token the supervisor requires.
+        computer_policy: JSON deny/allow rules for computer actions (``app/policy.py``).
     """
 
     runtime_env: str = "prd"
@@ -82,6 +89,12 @@ class Settings:
     redis_url: str | None = None
     web_concurrency: int = 1
     agentos_url: str = "http://127.0.0.1:8000"
+    computer_mode: str = "off"
+    computer_url: str = "http://127.0.0.1:8080"
+    supervisor_url: str = "http://127.0.0.1:8090"
+    computer_token: str | None = None
+    supervisor_token: str | None = None
+    computer_policy: str | None = None
 
     @property
     def is_dev(self) -> bool:
@@ -106,20 +119,41 @@ class Settings:
             redis_url=getenv("REDIS_URL") or None,
             web_concurrency=int(getenv("WEB_CONCURRENCY") or 1),
             agentos_url=getenv("AGENTOS_URL") or "http://127.0.0.1:8000",
+            computer_mode=(getenv("COMPUTER_MODE") or "off").strip().lower(),
+            computer_url=getenv("COMPUTER_URL") or "http://127.0.0.1:8080",
+            supervisor_url=getenv("SUPERVISOR_URL") or "http://127.0.0.1:8090",
+            computer_token=getenv("COMPUTER_TOKEN") or None,
+            supervisor_token=getenv("SUPERVISOR_TOKEN") or None,
+            computer_policy=getenv("COMPUTER_POLICY") or None,
         )
 
     def validate(self) -> None:
-        """Refuse to start a production deployment that is missing a secret or would break stream resume.
+        """Refuse to start a deployment that is misconfigured.
+
+        Always: an unknown ``COMPUTER_MODE`` or a malformed ``COMPUTER_POLICY`` (fail closed). In production:
+        a missing ``OPENROUTER_API_KEY`` or ``OS_SECURITY_KEY``, more than one worker without ``REDIS_URL``,
+        or computers enabled without their tokens.
 
         Raises:
-            RuntimeError: In production when ``OPENROUTER_API_KEY`` or ``OS_SECURITY_KEY`` is unset, or when
-                more than one worker runs without ``REDIS_URL``.
+            RuntimeError: Naming what is wrong.
         """
+        if self.computer_mode not in ("off", "shared", "per-bot"):
+            raise RuntimeError(f"COMPUTER_MODE must be off, shared, or per-bot, not {self.computer_mode!r}")
+        from app.policy import Policy
+
+        try:
+            Policy.from_json(self.computer_policy)
+        except (ValueError, TypeError) as error:
+            raise RuntimeError(f"COMPUTER_POLICY is invalid: {error}") from error
         if self.is_dev:
             return
         required = {"OPENROUTER_API_KEY": self.openrouter_api_key, "OS_SECURITY_KEY": self.os_security_key}
         if self.web_concurrency > 1:
             required["REDIS_URL (needed when WEB_CONCURRENCY > 1)"] = self.redis_url
+        if self.computer_mode != "off":
+            required["COMPUTER_TOKEN (needed when COMPUTER_MODE is on)"] = self.computer_token
+        if self.computer_mode == "per-bot":
+            required["SUPERVISOR_TOKEN (needed when COMPUTER_MODE=per-bot)"] = self.supervisor_token
         missing = [name for name, value in required.items() if not value]
         if missing:
             raise RuntimeError(

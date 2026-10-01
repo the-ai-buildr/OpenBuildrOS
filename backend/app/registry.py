@@ -15,9 +15,13 @@ from agno.tools.calculator import CalculatorTools
 from agno.tools.file.generation import FileGenerationTools
 from agno.tools.websearch import WebSearchTools
 
+from app.computer import ComputerTools
 from app.db import get_db
 from app.functions import extract_json, extract_urls
-from app.settings import build_model
+from app.settings import build_model, get_settings
+
+# A bot's own computer (browser, workspace, shell), when the deployment runs computers.
+computer_tools = [ComputerTools()] if get_settings().computer_mode != "off" else []
 
 registry = Registry(
     name="OpenBuildrOS Registry",
@@ -26,6 +30,7 @@ registry = Registry(
         WebSearchTools(),
         # In-memory run artifacts only; PDF/DOCX need extra native deps.
         FileGenerationTools(enable_pdf_generation=False, enable_docx_generation=False),
+        *computer_tools,
     ],
     models=[build_model()],
     dbs=[get_db()],

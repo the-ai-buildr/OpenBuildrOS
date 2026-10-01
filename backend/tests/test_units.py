@@ -119,6 +119,11 @@ class TestFakeModelScript:
             "tools": [{"function": {"name": "create_agent"}}],
         }
         assert plan_reply(body)["tool_call"]["arguments"]["name"] == "Scout"
+        with_tools = (
+            'Build and publish a new agent named "Op".\nPurpose: x\nGive it these registry tools: computer, calculator.'
+        )
+        args = plan_reply({**body, "messages": [{"role": "user", "content": with_tools}]})["tool_call"]["arguments"]
+        assert args["tool_names"] == ["computer", "calculator"]
 
     def test_ui_form_prompts_for_teams_and_workflows(self) -> None:
         team = (

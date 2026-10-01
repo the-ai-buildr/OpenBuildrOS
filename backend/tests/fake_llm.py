@@ -11,12 +11,14 @@ Script (applied to the latest message):
 - a ``tool`` message (a tool result came back) → reply ``"published: <tool result>"``;
 - otherwise, when the matching tool is offered, a user message:
 
-  - ``BUILD: <name>`` → ``create_agent``;
+  - ``BUILD: <name>`` or ``BUILD: <name> | <tool>, ...`` → ``create_agent`` (with those tools);
   - ``TEAM: <name> | <member id>, ...`` → ``create_team`` in coordinate mode;
   - ``FLOW: <name> | <agent id>, ...`` → ``create_workflow`` with one step per agent;
   - ``SCHEDULE: <agents|teams|workflows> <id> | <cron>`` → ``create_schedule``;
   - ``ARCHIVE: <component id>`` → ``archive_component`` (confirmation-gated);
   - ``ASK <member id>: <task>`` → ``delegate_task_to_member`` (a team leader delegating);
+  - ``BROWSE: <url>`` → ``browse``; ``SHELL: <command>`` → ``run_shell``;
+    ``WRITEFILE: <path> | <content>`` → ``write_file``; ``LISTFILES:`` → ``list_files``;
   - the UI Create form's ``Build and publish a new <agent|team|workflow> named "<name>"``
     request → the matching create call, with members or steps from its id list;
 
@@ -49,6 +51,7 @@ SLOW_DELAY_SECONDS = 0.2
 FORM_PREFIX = "Build and publish"
 FORM_NAME = re.compile(r'new (agent|team|workflow) named "([^"]+)"')
 FORM_IDS = re.compile(r"\(exact agent ids[^)]*\): ([^.\n]+)")
+FORM_TOOLS = re.compile(r"registry tools: ([^.\n]+)")
 
 
 def _text(content: Any) -> str:
@@ -93,13 +96,24 @@ def _scripted_call(text: str) -> dict[str, Any] | None:
     form = FORM_NAME.search(text) if text.startswith(FORM_PREFIX) else None
     if form:
         kind, name = form.groups()
-        ids = FORM_IDS.search(text)
+        listed = (FORM_TOOLS if kind == "agent" else FORM_IDS).search(text)
         command = {"agent": "BUILD", "team": "TEAM", "workflow": "FLOW"}[kind]
-        rest = name if kind == "agent" else f"{name} | {ids.group(1) if ids else ''}"
+        rest = f"{name} | {listed.group(1) if listed else ''}"
     if command == "BUILD":
-        name = rest.splitlines()[0] if rest else "Test Agent"
+        name, tools = _split(rest.splitlines()[0] if rest else "Test Agent")
         args = {"name": name, "instructions": f"You are {name}. Answer briefly.", "publish": True}
+        if tools:
+            args["tool_names"] = tools
         return {"name": "create_agent", "arguments": {**args, "description": f"{name}, built by the fake model."}}
+    if command == "BROWSE":
+        return {"name": "browse", "arguments": {"url": rest}}
+    if command == "SHELL":
+        return {"name": "run_shell", "arguments": {"command": rest}}
+    if command == "WRITEFILE":
+        path, _, content = (part.strip() for part in rest.partition("|"))
+        return {"name": "write_file", "arguments": {"path": path, "content": content}}
+    if command == "LISTFILES":
+        return {"name": "list_files", "arguments": {"path": rest}}
     if command == "TEAM":
         name, members = _split(rest)
         instructions = "Delegate each request to the best member and summarize the result."

@@ -20,6 +20,8 @@ const ALLOWED: ReadonlyArray<readonly [method: string, pattern: RegExp]> = [
   ['GET', /^sessions$/],
   ['GET', new RegExp(`^sessions/${SEGMENT}/runs$`)],
   ['GET', /^schedules$/],
+  ['GET', new RegExp(`^computers/${SEGMENT}/screen$`)],
+  ['GET', /^audit$/],
   ['POST', new RegExp(`^schedules/${SEGMENT}/(enable|disable|trigger)$`)],
 ]
 

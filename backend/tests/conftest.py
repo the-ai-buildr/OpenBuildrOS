@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import os
 import socket
+import sys
 import tempfile
 import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -28,7 +30,12 @@ def _free_port() -> int:
 
 
 FAKE_LLM_PORT = _free_port()
-TEST_DB = os.path.join(tempfile.mkdtemp(prefix="openbuildr-test-"), "test.db")
+COMPUTER_PORT = _free_port()
+TEST_ROOT = tempfile.mkdtemp(prefix="openbuildr-test-")
+TEST_DB = os.path.join(TEST_ROOT, "test.db")
+COMPUTER_TOKEN = "test-computer-token"
+# Shell commands mentioning "forbidden" are refused, to exercise the policy gateway.
+TEST_POLICY = '{"deny": [{"tool": "run_shell", "pattern": "forbidden"}], "allow": [{"tool": "*"}]}'
 
 os.environ.update(
     {
@@ -37,8 +44,16 @@ os.environ.update(
         "OPENROUTER_API_KEY": "test-key",
         "OPENROUTER_BASE_URL": f"http://127.0.0.1:{FAKE_LLM_PORT}",
         "OPENROUTER_MODEL_ID": "fake/model",
+        "COMPUTER_MODE": "shared",
+        "COMPUTER_URL": f"http://127.0.0.1:{COMPUTER_PORT}",
+        "COMPUTER_TOKEN": COMPUTER_TOKEN,
+        "COMPUTER_POLICY": TEST_POLICY,
+        "WORKSPACE_ROOT": os.path.join(TEST_ROOT, "workspaces"),
+        "PLAYWRIGHT_BROWSERS_PATH": os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers"),
     }
 )
+# The computer service lives in ../computer; the backend tests run it in shared mode.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "computer"))
 os.environ.pop("OS_SECURITY_KEY", None)
 
 
@@ -64,6 +79,15 @@ def fake_llm() -> Iterator[str]:
     from tests.fake_llm import app as fake_app
 
     with serve(fake_app, FAKE_LLM_PORT) as url:
+        yield url
+
+
+@pytest.fixture(scope="session", autouse=True)
+def computer_service() -> Iterator[str]:
+    """Serve the real computer (headless Chromium, workspaces, shell) for the session."""
+    import computer
+
+    with serve(computer.app, COMPUTER_PORT) as url:
         yield url
 
 
