@@ -1,73 +1,98 @@
 'use client'
 
 /**
- * The OpenBuildrOS workspace: agent sidebar, chat, and the "Create agent" dialog.
+ * The OpenBuildrOS workspace: the sidebar of agents, teams, and workflows; the
+ * channel view; and the Create and Routines dialogs.
  *
- * Conversations are kept per agent in localStorage (messages plus the AgentOS
- * session id), so a reload resumes where the user left off. Runs reconnect on
- * their own when the connection drops (see lib/resilient.ts).
+ * Channels are AgentOS sessions, so history lives on the server and follows the
+ * user across devices. Runs reconnect on their own when the connection drops
+ * (lib/resilient.ts), and a run still going when a channel is opened is reattached.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
   BUILDER_ID,
+  attachRun,
   cancelRun,
   checkHealth,
   continueRun,
-  listAgents,
-  runAgent,
-  type AgentSummary,
+  entityKey,
+  hasComputer,
+  listChannels,
+  listEntities,
+  loadChannel,
+  runEntity,
+  type Channel,
+  type Entity,
   type RunHandlers,
 } from '@/lib/api'
 import { applyEvents, newMessage, resolvePaused, type ChatMessage } from '@/lib/chat'
 
 import { ChatView } from './ChatView'
-import { CreateAgentDialog } from './CreateAgentDialog'
+import { ComputerPanel } from './ComputerPanel'
+import { CreateDialog } from './CreateDialog'
+import { RoutinesDialog } from './RoutinesDialog'
 import { Sidebar } from './Sidebar'
 
-/** One agent's conversation. */
+/** The open conversation with one entity. */
 export interface Conversation {
   sessionId: string
   messages: ChatMessage[]
 }
 
-const STORAGE_KEY = 'openbuildr.conversations.v1'
+const BUILDER_KEY = `agents:${BUILDER_ID}`
 const HEALTH_POLL_MS = 30_000
 const NO_MESSAGES: ChatMessage[] = []
+const NO_CHANNELS: Channel[] = []
 
-function loadConversations(): Record<string, Conversation> {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as Record<string, Conversation>
-  } catch {
-    return {}
-  }
-}
+const freshConversation = (): Conversation => ({ sessionId: crypto.randomUUID(), messages: [] })
+const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
 export function Workspace() {
-  const [agents, setAgents] = useState<AgentSummary[]>([])
-  const [selectedId, setSelectedId] = useState<string>(BUILDER_ID)
+  const [entities, setEntities] = useState<Entity[]>([])
+  const [selectedKey, setSelectedKey] = useState(BUILDER_KEY)
+  const [channels, setChannels] = useState<Record<string, Channel[]>>({})
   const [conversations, setConversations] = useState<Record<string, Conversation>>({})
-  const [busyAgent, setBusyAgent] = useState<string | null>(null)
+  const [busyKey, setBusyKey] = useState<string | null>(null)
   const [healthy, setHealthy] = useState<boolean | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [creating, setCreating] = useState(false)
+  const [dialog, setDialog] = useState<'create' | 'routines' | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  // Bumped whenever the user picks what a conversation shows, so a slower load cannot overwrite it.
+  const viewVersion = useRef<Record<string, number>>({})
+  const claimView = (key: string) => (viewVersion.current[key] = (viewVersion.current[key] ?? 0) + 1)
 
-  const refreshAgents = useCallback(async () => {
+  const selected = entities.find((entity) => entityKey(entity) === selectedKey)
+  const entityOf = useCallback((key: string) => {
+    const [kind, ...id] = key.split(':')
+    return { kind: kind as Entity['kind'], id: id.join(':') }
+  }, [])
+
+  const refreshEntities = useCallback(async () => {
     try {
-      setAgents(await listAgents())
+      setEntities(await listEntities())
       setLoadError(null)
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : String(error))
+      setLoadError(errorText(error))
     }
   }, [])
 
+  const refreshChannels = useCallback(
+    async (key: string) => {
+      try {
+        const list = await listChannels(entityOf(key))
+        setChannels((all) => ({ ...all, [key]: list }))
+        return list
+      } catch {
+        return []
+      }
+    },
+    [entityOf],
+  )
+
   useEffect(() => {
-    // Hydrate from localStorage after mount: the server render has no storage.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setConversations(loadConversations())
-    void refreshAgents()
+    void refreshEntities()
     const poll = () => {
       if (document.visibilityState === 'visible') void checkHealth().then(setHealthy)
     }
@@ -78,82 +103,108 @@ export function Workspace() {
       clearInterval(timer)
       document.removeEventListener('visibilitychange', poll)
     }
-  }, [refreshAgents])
+  }, [refreshEntities])
 
-  // Persist between runs only: writing the whole history on every streamed batch is wasted work.
-  useEffect(() => {
-    if (busyAgent !== null) return
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations))
-    } catch {
-      // Storage full or blocked: the chat still works for this page view.
-    }
-  }, [conversations, busyAgent])
-
-  /** Replace the last (assistant) message of an agent's conversation. */
-  const patchLast = useCallback((agentId: string, update: (message: ChatMessage) => ChatMessage) => {
+  /** Replace the last (assistant) message of a conversation. */
+  const patchLast = useCallback((key: string, update: (message: ChatMessage) => ChatMessage) => {
     setConversations((all) => {
-      const current = all[agentId]
+      const current = all[key]
       if (!current?.messages.length) return all
       const messages = [...current.messages]
       messages[messages.length - 1] = update(messages[messages.length - 1])
-      return { ...all, [agentId]: { ...current, messages } }
+      return { ...all, [key]: { ...current, messages } }
     })
   }, [])
 
-  /** Run `stream` for `agentId`, folding each batch of events into the last message. */
+  /** Run `stream` for the conversation `key`, folding each batch of events into the last message. */
   const drive = useCallback(
-    async (agentId: string, stream: (handlers: RunHandlers) => Promise<void>) => {
+    async (key: string, stream: (handlers: RunHandlers) => Promise<void>) => {
       const controller = new AbortController()
       abortRef.current = controller
-      setBusyAgent(agentId)
+      setBusyKey(key)
       try {
         await stream({
-          onEvents: (events) => patchLast(agentId, (message) => applyEvents(message, events)),
+          onEvents: (events) => patchLast(key, (message) => applyEvents(message, events)),
           onReconnect: (attempt, max) =>
-            patchLast(agentId, (message) => ({
-              ...message,
-              notice: `Connection lost. Reconnecting (${attempt}/${max})…`,
-            })),
+            patchLast(key, (message) => ({ ...message, notice: `Connection lost. Reconnecting (${attempt}/${max})…` })),
           signal: controller.signal,
         })
       } catch (error) {
-        if (error instanceof DOMException && error.name === 'AbortError') {
-          patchLast(agentId, (message) => ({ ...message, notice: 'Stopped.' }))
-        } else {
-          const text = error instanceof Error ? error.message : String(error)
-          patchLast(agentId, (message) => ({ ...message, error: text, notice: undefined }))
-        }
+        const aborted = error instanceof DOMException && error.name === 'AbortError'
+        patchLast(key, (message) =>
+          aborted ? { ...message, notice: 'Stopped.' } : { ...message, error: errorText(error), notice: undefined },
+        )
       } finally {
-        patchLast(agentId, (message) => ({ ...message, done: true }))
-        setBusyAgent(null)
+        patchLast(key, (message) => ({ ...message, done: true }))
+        setBusyKey(null)
         abortRef.current = null
-        // The Builder may have created, edited, or archived agents.
-        if (agentId === BUILDER_ID) void refreshAgents()
+        void refreshChannels(key)
+        // The Builder may have created, edited, or archived something.
+        if (key === BUILDER_KEY) void refreshEntities()
       }
     },
-    [patchLast, refreshAgents],
+    [patchLast, refreshChannels, refreshEntities],
   )
 
-  const send = (agentId: string, text: string) => {
-    const base = conversations[agentId] ?? { sessionId: crypto.randomUUID(), messages: [] }
-    setConversations((all) => ({
-      ...all,
-      [agentId]: { ...base, messages: [...base.messages, newMessage('user', text), newMessage('assistant')] },
-    }))
-    void drive(agentId, (handlers) => runAgent(agentId, text, base.sessionId, handlers))
+  /** Open a stored channel, reattaching to its last run if that run is still going. */
+  const openChannel = useCallback(
+    async (key: string, sessionId: string, version = claimView(key)) => {
+      const entity = entityOf(key)
+      let messages: ChatMessage[]
+      try {
+        messages = await loadChannel(entity.kind, sessionId)
+      } catch (error) {
+        setLoadError(errorText(error))
+        return
+      }
+      if (viewVersion.current[key] !== version) return
+      setConversations((all) => ({ ...all, [key]: { sessionId, messages } }))
+      const last = messages.at(-1)
+      if (last && !last.done && last.runId && busyKey === null) {
+        const runId = last.runId
+        void drive(key, (handlers) => attachRun(entity, runId, sessionId, handlers))
+      }
+    },
+    [entityOf, drive, busyKey],
+  )
+
+  // First visit to an entity: open its latest channel, or start a fresh one.
+  useEffect(() => {
+    if (conversations[selectedKey]) return
+    const key = selectedKey
+    const version = claimView(key)
+    void refreshChannels(key).then((list) => {
+      if (viewVersion.current[key] !== version) return
+      if (list.length) void openChannel(key, list[0].session_id, version)
+      else setConversations((all) => (all[key] ? all : { ...all, [key]: freshConversation() }))
+    })
+  }, [selectedKey, conversations, refreshChannels, openChannel])
+
+  const startChannel = (key: string) => {
+    claimView(key)
+    setConversations((all) => ({ ...all, [key]: freshConversation() }))
   }
 
-  const conversation = conversations[selectedId]
+  const send = (key: string, text: string) => {
+    claimView(key)
+    const base = conversations[key] ?? freshConversation()
+    setConversations((all) => ({
+      ...all,
+      [key]: { ...base, messages: [...base.messages, newMessage('user', text), newMessage('assistant')] },
+    }))
+    void drive(key, (handlers) => runEntity(entityOf(key), text, base.sessionId, handlers))
+  }
+
+  const conversation = conversations[selectedKey]
   const messages = conversation?.messages ?? NO_MESSAGES
 
   const decide = (approve: boolean) => {
     const paused = messages.at(-1)?.paused
     if (!conversation || !paused) return
-    const agentId = selectedId
-    patchLast(agentId, (message) => ({ ...message, paused: undefined, done: false }))
+    const key = selectedKey
+    patchLast(key, (message) => ({ ...message, paused: undefined, done: false }))
     const tools = resolvePaused(paused, approve)
-    void drive(agentId, (handlers) => continueRun(agentId, paused.runId, conversation.sessionId, tools, handlers))
+    void drive(key, (handlers) => continueRun(entityOf(key), paused.runId, conversation.sessionId, tools, handlers))
   }
 
   /**
@@ -161,57 +212,57 @@ export function Workspace() {
    * its stream close with RunCancelled; abort locally only if that is not possible.
    */
   const stop = () => {
-    if (!busyAgent) return
-    const agentId = busyAgent
-    const runId = conversations[agentId]?.messages.at(-1)?.runId
+    if (!busyKey) return
+    const key = busyKey
+    const runId = conversations[key]?.messages.at(-1)?.runId
     if (!runId) {
       abortRef.current?.abort()
       return
     }
-    patchLast(agentId, (message) => ({ ...message, notice: 'Stopping…' }))
-    cancelRun(agentId, runId).catch(() => abortRef.current?.abort())
+    patchLast(key, (message) => ({ ...message, notice: 'Stopping…' }))
+    cancelRun(entityOf(key), runId).catch(() => abortRef.current?.abort())
   }
 
-  const userAgents = agents.filter((agent) => agent.is_component)
+  const showComputer = selected?.kind === 'agents' && hasComputer(selected)
 
   return (
-    <div className="shell">
+    <div className={`shell ${showComputer ? 'with-computer' : ''}`}>
       <Sidebar
-        adminAgents={agents.filter((agent) => !agent.is_component)}
-        userAgents={userAgents}
-        selectedId={selectedId}
+        entities={entities}
+        selectedKey={selectedKey}
         healthy={healthy}
         loadError={loadError}
-        onSelect={setSelectedId}
-        onCreate={() => setCreating(true)}
+        onSelect={setSelectedKey}
+        onCreate={() => setDialog('create')}
+        onRoutines={() => setDialog('routines')}
       />
       <ChatView
-        agentId={selectedId}
-        agent={agents.find((agent) => agent.id === selectedId)}
+        entity={selected}
+        entityId={entityOf(selectedKey).id}
+        channels={channels[selectedKey] ?? NO_CHANNELS}
+        sessionId={conversation?.sessionId}
         messages={messages}
-        busy={busyAgent === selectedId}
-        locked={busyAgent !== null && busyAgent !== selectedId}
-        onSend={(text) => send(selectedId, text)}
+        busy={busyKey === selectedKey}
+        locked={busyKey !== null && busyKey !== selectedKey}
+        onSend={(text) => send(selectedKey, text)}
         onStop={stop}
         onDecide={decide}
-        onReset={() =>
-          setConversations((all) => {
-            const rest = { ...all }
-            delete rest[selectedId]
-            return rest
-          })
-        }
+        onOpenChannel={(sessionId) => void openChannel(selectedKey, sessionId)}
+        onNewChannel={() => startChannel(selectedKey)}
       />
-      {creating && (
-        <CreateAgentDialog
-          onClose={() => setCreating(false)}
+      {showComputer && selected && <ComputerPanel botId={selected.id} active={busyKey === selectedKey} />}
+      {dialog === 'create' && (
+        <CreateDialog
+          agents={entities.filter((entity) => entity.kind === 'agents' && entity.is_component)}
+          onClose={() => setDialog(null)}
           onSubmit={(prompt) => {
-            setCreating(false)
-            setSelectedId(BUILDER_ID)
-            send(BUILDER_ID, prompt)
+            setDialog(null)
+            setSelectedKey(BUILDER_KEY)
+            send(BUILDER_KEY, prompt)
           }}
         />
       )}
+      {dialog === 'routines' && <RoutinesDialog onClose={() => setDialog(null)} />}
     </div>
   )
 }

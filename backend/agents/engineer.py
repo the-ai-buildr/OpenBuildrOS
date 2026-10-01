@@ -11,9 +11,8 @@ from pathlib import Path
 from agno.context.mode import ContextMode
 from agno.context.workspace import WorkspaceContextProvider
 
-from agents.common import admin_agent
+from agents.common import ENGINEER_ID, admin_agent
 
-ENGINEER_ID = "platform-engineer"
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 
 # Tools mode gives the agent read_file / list_files / search_content directly.

@@ -60,19 +60,7 @@ def test_registry_exposes_buildable_tools(client: TestClient) -> None:
 
 def test_palette_lists_only_declared_tools(client: TestClient) -> None:
     names = [tool["name"] for tool in client.get("/palette").json()]
-    assert names == ["calculator", "websearch", "file_generation"]
-
-
-def test_builder_cannot_compose_teams_or_workflows(client: TestClient) -> None:
-    from agno.tools.studio import StudioTools
-
-    from agents.builder import platform_builder
-
-    assert isinstance(platform_builder.tools, list)
-    studio = next(tool for tool in platform_builder.tools if isinstance(tool, StudioTools))
-    studio_functions = set(studio.functions)
-    assert "create_agent" in studio_functions
-    assert not {"create_team", "create_workflow"} & studio_functions
+    assert names == ["calculator", "websearch", "file_generation", "computer"]
 
 
 def test_admin_agent_streams_a_reply(client: TestClient) -> None:
@@ -150,7 +138,7 @@ def test_security_key_gates_the_api(client: TestClient, monkeypatch) -> None:  #
     from app.main import api_settings
 
     monkeypatch.setattr(api_settings, "os_security_key", "s3cret")
-    for path in ("/agents", "/palette"):
+    for path in ("/agents", "/palette", "/ag-ui/platform-manager/status"):
         assert client.get(path).status_code == 401
         assert client.get(path, headers={"Authorization": "Bearer wrong"}).status_code == 401
         assert client.get(path, headers={"Authorization": "Bearer s3cret"}).status_code == 200

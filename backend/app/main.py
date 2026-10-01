@@ -8,9 +8,11 @@ Builds the FastAPI app that serves:
   used by the OpenBuildrOS web UI and os.agno.com;
 - the admin agents Platform Builder, Platform Manager, and Platform Engineer, plus
   every agent published at runtime through Studio;
-- AG-UI endpoints for each admin agent at ``POST /ag-ui/{agent_id}/agui``;
+- AG-UI endpoints for every agent and team, Studio-built ones included
+  (``POST /ag-ui/{agent_id}/agui``, ``POST /ag-ui/teams/{team_id}/agui``; see ``app/agui.py``);
 - an A2A server for every agent under ``/a2a``;
-- ``GET /palette``: the tools Platform Builder may wire into new agents.
+- ``GET /palette``: the tools Platform Builder may wire into new agents;
+- the scheduler, which fires Studio-created schedules against this API.
 
 Runs started with ``background=true`` survive client disconnects; their events
 carry an ``event_index`` and can be replayed with
@@ -24,14 +26,16 @@ Run locally with ``uvicorn app.main:app --reload``.
 from agno.os import AgentOS
 from agno.os.auth import get_authentication_dependency
 from agno.os.event_streams import BaseEventStream
-from agno.os.interfaces.agui import AGUI
 from agno.os.settings import AgnoAPISettings
 from agno.tools import Toolkit
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Response
 
 from agents.builder import platform_builder
 from agents.engineer import platform_engineer
 from agents.manager import platform_manager
+from app import audit
+from app.agui import agui_router
+from app.computer import ComputerError, call_computer
 from app.db import get_db
 from app.registry import registry
 from app.settings import PRODUCT_NAME, get_settings
@@ -102,15 +106,43 @@ def palette() -> list[dict[str, str]]:
     return tools
 
 
-agent_os = AgentOS(
+@base_app.get("/computers/{bot_id}/screen", dependencies=[Depends(get_authentication_dependency(api_settings))])
+def computer_screen(bot_id: str) -> Response:
+    """A PNG of the bot's screen for the UI's live view. Never starts a stopped computer.
+
+    Raises:
+        HTTPException: 404 when computers are off or this bot's computer is not running.
+    """
+    if settings.computer_mode == "off":
+        raise HTTPException(status_code=404, detail="Computers are off in this deployment")
+    try:
+        png = call_computer(bot_id, "GET", "/browser/screenshot", start=False).content
+    except ComputerError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return Response(content=png, media_type="image/png", headers={"cache-control": "no-store"})
+
+
+@base_app.get("/audit", dependencies=[Depends(get_authentication_dependency(api_settings))])
+def audit_log(bot_id: str | None = None, limit: int = 50) -> list[dict]:
+    """The newest computer actions: what was allowed, refused (with the rule), and what failed."""
+    return audit.recent(bot_id=bot_id, limit=limit)
+
+
+# Resolved per request, so agents and teams built in Studio are served too.
+base_app.include_router(
+    agui_router(lambda: agent_os), dependencies=[Depends(get_authentication_dependency(api_settings))]
+)
+
+agent_os: AgentOS = AgentOS(
     id="openbuildros",
     name=PRODUCT_NAME,
     description="Open source agent builder platform on Agno AgentOS.",
     db=get_db(),
     agents=ADMIN_AGENTS,
     registry=registry,
-    interfaces=[AGUI(agent=agent, prefix=f"/ag-ui/{agent.id}") for agent in ADMIN_AGENTS],
     a2a_interface=True,
+    scheduler=True,
+    scheduler_base_url=settings.agentos_url,
     tracing=True,
     telemetry=False,
     settings=api_settings,

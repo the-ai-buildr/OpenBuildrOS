@@ -1,5 +1,9 @@
 # Test and lint tooling on top of the runtime lock.
 -r requirements.txt
+# The backend tests run the real computer service (../computer) in shared mode; its other
+# dependencies (fastapi, uvicorn) are already in the runtime lock. Keep in step with
+# computer/requirements.txt.
+playwright==1.56.0
 pytest==8.4.2
 mypy==1.18.2
 ruff==0.13.3

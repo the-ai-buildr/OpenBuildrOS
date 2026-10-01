@@ -9,10 +9,19 @@ access or an API key.
 Script (applied to the latest message):
 
 - a ``tool`` message (a tool result came back) → reply ``"published: <tool result>"``;
-- a user message ``BUILD: <name>`` (or the UI form's ``... new agent named "<name>"``)
-  while ``create_agent`` is offered → call ``create_agent(name=<name>, publish=true, ...)``;
-- a user message ``ARCHIVE: <component id>`` while ``archive_component`` is offered →
-  call ``archive_component(component_id=<id>)`` (a confirmation-gated tool);
+- otherwise, when the matching tool is offered, a user message:
+
+  - ``BUILD: <name>`` or ``BUILD: <name> | <tool>, ...`` → ``create_agent`` (with those tools);
+  - ``TEAM: <name> | <member id>, ...`` → ``create_team`` in coordinate mode;
+  - ``FLOW: <name> | <agent id>, ...`` → ``create_workflow`` with one step per agent;
+  - ``SCHEDULE: <agents|teams|workflows> <id> | <cron>`` → ``create_schedule``;
+  - ``ARCHIVE: <component id>`` → ``archive_component`` (confirmation-gated);
+  - ``ASK <member id>: <task>`` → ``delegate_task_to_member`` (a team leader delegating);
+  - ``BROWSE: <url>`` → ``browse``; ``SHELL: <command>`` → ``run_shell``;
+    ``WRITEFILE: <path> | <content>`` → ``write_file``; ``LISTFILES:`` → ``list_files``;
+  - the UI Create form's ``Build and publish a new <agent|team|workflow> named "<name>"``
+    request → the matching create call, with members or steps from its id list;
+
 - anything else → reply ``"Echo: <user message>"``.
 
 A user message starting with ``SLOW`` streams its words 0.2 s apart, long enough
@@ -36,11 +45,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 app = FastAPI(title="Fake OpenRouter")
 
-BUILD_PREFIX = "BUILD:"
-ARCHIVE_PREFIX = "ARCHIVE:"
 SLOW_PREFIX = "SLOW"
 SLOW_DELAY_SECONDS = 0.2
-FORM_NAME = re.compile(r'new agent named "([^"]+)"')
+# The UI's "Create agent" form opens its request with this sentence (frontend/lib/chat.ts).
+FORM_PREFIX = "Build and publish"
+FORM_NAME = re.compile(r'new (agent|team|workflow) named "([^"]+)"')
+FORM_IDS = re.compile(r"\(exact agent ids[^)]*\): ([^.\n]+)")
+FORM_TOOLS = re.compile(r"registry tools: ([^.\n]+)")
 
 
 def _text(content: Any) -> str:
@@ -66,29 +77,63 @@ def plan_reply(body: dict[str, Any]) -> dict[str, Any]:
 
     user_text = _text(last.get("content")).strip()
     tool_names = {tool.get("function", {}).get("name") for tool in body.get("tools") or []}
-    form_match = FORM_NAME.search(user_text)
-    if form_match:
-        name = form_match.group(1)
-    elif user_text.startswith(BUILD_PREFIX):
-        name = user_text[len(BUILD_PREFIX) :].strip().splitlines()[0] or "Test Agent"
-    else:
-        name = None
-    if name and "create_agent" in tool_names:
-        return {
-            "tool_call": {
-                "name": "create_agent",
-                "arguments": {
-                    "name": name,
-                    "instructions": f"You are {name}. Answer briefly.",
-                    "description": f"{name}, built by the fake model.",
-                    "publish": True,
-                },
-            }
-        }
-    if user_text.startswith(ARCHIVE_PREFIX) and "archive_component" in tool_names:
-        component_id = user_text[len(ARCHIVE_PREFIX) :].strip()
-        return {"tool_call": {"name": "archive_component", "arguments": {"component_id": component_id}}}
+    call = _scripted_call(user_text)
+    if call and call["name"] in tool_names:
+        return {"tool_call": call}
     return {"content": f"Echo: {user_text}"}
+
+
+def _split(rest: str) -> tuple[str, list[str]]:
+    """Split ``"<name> | a, b"`` into the name and the trimmed list after the bar."""
+    name, _, tail = rest.partition("|")
+    return name.strip(), [item.strip() for item in tail.split(",") if item.strip()]
+
+
+def _scripted_call(text: str) -> dict[str, Any] | None:
+    """Map a scripted user message to the tool call it stands for, or ``None``."""
+    command, _, rest = text.partition(":")
+    command, rest = command.strip(), rest.strip()
+    form = FORM_NAME.search(text) if text.startswith(FORM_PREFIX) else None
+    if form:
+        kind, name = form.groups()
+        listed = (FORM_TOOLS if kind == "agent" else FORM_IDS).search(text)
+        command = {"agent": "BUILD", "team": "TEAM", "workflow": "FLOW"}[kind]
+        rest = f"{name} | {listed.group(1) if listed else ''}"
+    if command == "BUILD":
+        name, tools = _split(rest.splitlines()[0] if rest else "Test Agent")
+        args = {"name": name, "instructions": f"You are {name}. Answer briefly.", "publish": True}
+        if tools:
+            args["tool_names"] = tools
+        return {"name": "create_agent", "arguments": {**args, "description": f"{name}, built by the fake model."}}
+    if command == "BROWSE":
+        return {"name": "browse", "arguments": {"url": rest}}
+    if command == "SHELL":
+        return {"name": "run_shell", "arguments": {"command": rest}}
+    if command == "WRITEFILE":
+        path, _, content = (part.strip() for part in rest.partition("|"))
+        return {"name": "write_file", "arguments": {"path": path, "content": content}}
+    if command == "LISTFILES":
+        return {"name": "list_files", "arguments": {"path": rest}}
+    if command == "TEAM":
+        name, members = _split(rest)
+        instructions = "Delegate each request to the best member and summarize the result."
+        args = {"name": name, "instructions": instructions, "member_ids": members, "publish": True}
+        return {"name": "create_team", "arguments": args}
+    if command == "FLOW":
+        name, agents = _split(rest)
+        steps = [{"name": f"step-{i + 1}", "agent_id": agent} for i, agent in enumerate(agents)]
+        return {"name": "create_workflow", "arguments": {"name": name, "steps": steps, "publish": True}}
+    if command == "SCHEDULE":
+        target, cron = (part.strip() for part in rest.split("|", 1))
+        target_type, target_id = target.split()
+        args = {"name": f"{target_id}-schedule", "cron": cron, "message": "Scheduled run"}
+        return {"name": "create_schedule", "arguments": {**args, "target_type": target_type, "target_id": target_id}}
+    if command == "ARCHIVE":
+        return {"name": "archive_component", "arguments": {"component_id": rest}}
+    if text.startswith("ASK "):
+        member_id, _, task = text[4:].partition(":")
+        return {"name": "delegate_task_to_member", "arguments": {"member_id": member_id.strip(), "task": task.strip()}}
+    return None
 
 
 def _usage() -> dict[str, int]:

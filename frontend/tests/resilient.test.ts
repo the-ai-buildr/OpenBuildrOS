@@ -120,6 +120,30 @@ describe('streamWithResume', () => {
   })
 })
 
+describe('streamWithResume with team streams', () => {
+  it('does not end the stream when a member run completes', async () => {
+    const resume = vi.fn(async (_id: string, _last: number, handler: EventsHandler) => {
+      handler([{ event: 'TeamRunCompleted', event_index: 3, run_id: 'team' }])
+    })
+    const seen: AgentEvent[] = []
+    await streamWithResume({
+      start: async (handler) => {
+        handler([
+          { event: 'TeamRunStarted', event_index: 0, run_id: 'team' },
+          { event: 'RunStarted', event_index: 1, run_id: 'member' },
+          { event: 'RunCompleted', event_index: 2, run_id: 'member' },
+        ])
+      },
+      resume,
+      onEvents: (events) => seen.push(...events),
+      signal: new AbortController().signal,
+      sleep: noSleep,
+    })
+    expect(resume).toHaveBeenCalledWith('team', 2, expect.any(Function), expect.any(AbortSignal))
+    expect(seen.at(-1)?.event).toBe('TeamRunCompleted')
+  })
+})
+
 describe('backoff and retry classification', () => {
   it('doubles, caps, and jitters the delay', () => {
     expect(backoffDelay(0, 500, 8000, () => 1)).toBe(500)

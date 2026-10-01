@@ -10,11 +10,9 @@ import json
 
 from agno.tools.agentos import AgentOSTools
 
-from agents.common import admin_agent
+from agents.common import MANAGER_ID, admin_agent
 from app.db import get_db
 from app.settings import get_settings
-
-MANAGER_ID = "platform-manager"
 
 
 def get_platform_config() -> str:
