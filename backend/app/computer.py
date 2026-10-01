@@ -21,7 +21,8 @@ Deployment modes (``COMPUTER_MODE``):
 from __future__ import annotations
 
 import json
-from functools import cache
+from collections.abc import Callable
+from functools import cache, partial
 from typing import Any
 
 import httpx
@@ -97,51 +98,46 @@ def call_computer(bot_id: str, method: str, path: str, start: bool = True, **kwa
     return response
 
 
-def _identity(agent: Agent, run_context: RunContext) -> tuple[str, str | None, str | None]:
-    """The bot id, user id, and run id behind a tool call (both injected by Agno)."""
-    return str(agent.id), run_context.user_id, run_context.run_id
-
-
-def gated(tool: str, bot_id: str, target: str, run: Any, *, user_id: str | None, run_id: str | None) -> str:
-    """Decide, audit, then run ``run()``; returns the result or the refusal as text for the model.
+def gated(tool: str, target: str, agent: Agent, run_context: RunContext, run: Callable[[str], Any]) -> str:
+    """Decide, audit, then perform one action; returns its result, or the refusal, as text for the model.
 
     Args:
         tool: Action name the policy matches on.
-        bot_id: The agent acting.
         target: URL, command, or path the policy inspects and the audit row records.
-        run: Zero-argument callable performing the action, returning text.
+        agent: The acting agent (injected by Agno); its id selects the computer.
+        run_context: The run (injected by Agno), for the audit row's user and run ids.
+        run: Performs the action given the bot id; its result is returned as text.
     """
-    decision = policy().decide(Action(tool=tool, bot_id=bot_id, target=target))
-    audit.record(
+    bot_id = str(agent.id)
+    log = partial(
+        audit.record,
         bot_id=bot_id,
         tool=tool,
         target=target,
-        decision="allowed" if decision.allowed else "denied",
-        rule=decision.rule,
-        user_id=user_id,
-        run_id=run_id,
+        user_id=run_context.user_id,
+        run_id=run_context.run_id,
     )
+    decision = policy().decide(Action(tool=tool, bot_id=bot_id, target=target))
+    log(decision="allowed" if decision.allowed else "denied", rule=decision.rule)
     if not decision.allowed:
         return f"Refused by policy ({decision.rule}). Do not retry this action; tell the user it is not permitted."
     try:
-        return str(run())
+        return str(run(bot_id))
     except ComputerError as error:
-        audit.record(
-            bot_id=bot_id,
-            tool=tool,
-            target=target,
-            decision="failed",
-            detail=str(error),
-            user_id=user_id,
-            run_id=run_id,
-        )
+        log(decision="failed", detail=str(error))
         return f"Error: {error}"
 
 
-def _page_summary(response: httpx.Response) -> str:
-    page = response.json()
+def _page(bot_id: str, method: str, path: str, **kwargs: Any) -> str:
+    """Call a browser route and summarise the page it answers with."""
+    page = call_computer(bot_id, method, path, **kwargs).json()
     links = "\n".join(f"- {link['text'] or '(no text)'}: {link['href']}" for link in page.get("links", [])[:20])
     return f"URL: {page['url']}\nTitle: {page['title']}\n\n{page['text']}\n\nLinks:\n{links}"
+
+
+def _json(bot_id: str, method: str, path: str, **kwargs: Any) -> str:
+    """Call a route and return its JSON answer as text."""
+    return json.dumps(call_computer(bot_id, method, path, **kwargs).json())
 
 
 class ComputerTools(Toolkit):
@@ -177,14 +173,8 @@ class ComputerTools(Toolkit):
         Returns:
             The page URL, title, visible text, and links.
         """
-        bot_id, user_id, run_id = _identity(agent, run_context)
         return gated(
-            "browse",
-            bot_id,
-            url,
-            lambda: _page_summary(call_computer(bot_id, "POST", "/browser/navigate", json={"url": url})),
-            user_id=user_id,
-            run_id=run_id,
+            "browse", url, agent, run_context, lambda bot: _page(bot, "POST", "/browser/navigate", json={"url": url})
         )
 
     def read_page(self, agent: Agent, run_context: RunContext) -> str:
@@ -193,15 +183,7 @@ class ComputerTools(Toolkit):
         Returns:
             The page URL, title, visible text, and links.
         """
-        bot_id, user_id, run_id = _identity(agent, run_context)
-        return gated(
-            "read_page",
-            bot_id,
-            "",
-            lambda: _page_summary(call_computer(bot_id, "GET", "/browser/page")),
-            user_id=user_id,
-            run_id=run_id,
-        )
+        return gated("read_page", "", agent, run_context, lambda bot: _page(bot, "GET", "/browser/page"))
 
     def click(self, target: str, agent: Agent, run_context: RunContext) -> str:
         """Click a link or button on the current page.
@@ -212,15 +194,8 @@ class ComputerTools(Toolkit):
         Returns:
             The page after the click.
         """
-        bot_id, user_id, run_id = _identity(agent, run_context)
-        return gated(
-            "click",
-            bot_id,
-            target,
-            lambda: _page_summary(call_computer(bot_id, "POST", "/browser/click", json={"target": target})),
-            user_id=user_id,
-            run_id=run_id,
-        )
+        body = {"target": target}
+        return gated("click", target, agent, run_context, lambda bot: _page(bot, "POST", "/browser/click", json=body))
 
     def type_text(self, target: str, text: str, agent: Agent, run_context: RunContext, submit: bool = False) -> str:
         """Type into a field on the current page.
@@ -233,15 +208,9 @@ class ComputerTools(Toolkit):
         Returns:
             The page afterwards.
         """
-        bot_id, user_id, run_id = _identity(agent, run_context)
         body = {"target": target, "text": text, "submit": submit}
         return gated(
-            "type_text",
-            bot_id,
-            target,
-            lambda: _page_summary(call_computer(bot_id, "POST", "/browser/type", json=body)),
-            user_id=user_id,
-            run_id=run_id,
+            "type_text", target, agent, run_context, lambda bot: _page(bot, "POST", "/browser/type", json=body)
         )
 
     def run_shell(self, command: str, agent: Agent, run_context: RunContext, timeout: int = 30) -> str:
@@ -254,16 +223,8 @@ class ComputerTools(Toolkit):
         Returns:
             JSON with exit_code, stdout, stderr, and timed_out.
         """
-        bot_id, user_id, run_id = _identity(agent, run_context)
         body = {"command": command, "timeout": timeout}
-        return gated(
-            "run_shell",
-            bot_id,
-            command,
-            lambda: json.dumps(call_computer(bot_id, "POST", "/shell", json=body).json()),
-            user_id=user_id,
-            run_id=run_id,
-        )
+        return gated("run_shell", command, agent, run_context, lambda bot: _json(bot, "POST", "/shell", json=body))
 
     def list_files(self, agent: Agent, run_context: RunContext, path: str = "") -> str:
         """List a directory in your workspace.
@@ -272,17 +233,10 @@ class ComputerTools(Toolkit):
             path: Directory relative to your workspace; empty for its root.
 
         Returns:
-            JSON list of entries with name, type, and size.
+            JSON with the path and its entries (name, type, and size).
         """
-        bot_id, user_id, run_id = _identity(agent, run_context)
-        return gated(
-            "list_files",
-            bot_id,
-            path,
-            lambda: json.dumps(call_computer(bot_id, "GET", "/files", params={"path": path}).json()),
-            user_id=user_id,
-            run_id=run_id,
-        )
+        params = {"path": path}
+        return gated("list_files", path, agent, run_context, lambda bot: _json(bot, "GET", "/files", params=params))
 
     def read_file(self, path: str, agent: Agent, run_context: RunContext) -> str:
         """Read a text file from your workspace.
@@ -293,14 +247,13 @@ class ComputerTools(Toolkit):
         Returns:
             The file's content (capped).
         """
-        bot_id, user_id, run_id = _identity(agent, run_context)
+        params = {"path": path}
         return gated(
             "read_file",
-            bot_id,
             path,
-            lambda: call_computer(bot_id, "GET", "/files/read", params={"path": path}).json()["content"],
-            user_id=user_id,
-            run_id=run_id,
+            agent,
+            run_context,
+            lambda bot: call_computer(bot, "GET", "/files/read", params=params).json()["content"],
         )
 
     def write_file(self, path: str, content: str, agent: Agent, run_context: RunContext) -> str:
@@ -313,13 +266,5 @@ class ComputerTools(Toolkit):
         Returns:
             JSON with the path and size written.
         """
-        bot_id, user_id, run_id = _identity(agent, run_context)
         body = {"path": path, "content": content}
-        return gated(
-            "write_file",
-            bot_id,
-            path,
-            lambda: json.dumps(call_computer(bot_id, "POST", "/files/write", json=body).json()),
-            user_id=user_id,
-            run_id=run_id,
-        )
+        return gated("write_file", path, agent, run_context, lambda bot: _json(bot, "POST", "/files/write", json=body))

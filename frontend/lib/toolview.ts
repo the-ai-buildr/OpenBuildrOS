@@ -7,7 +7,7 @@
  */
 
 /** Prefix the computer gateway puts on actions the policy refused (`backend/app/computer.py`). */
-export const REFUSED_PREFIX = 'Refused by policy'
+const REFUSED_PREFIX = 'Refused by policy'
 
 /** Tools from the bot's computer toolkit; their failures come back as `Error: ...` text. */
 const COMPUTER_TOOLS = new Set([
