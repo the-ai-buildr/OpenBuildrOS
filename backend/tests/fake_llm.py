@@ -15,16 +15,20 @@ Script (applied to the latest message):
   call ``archive_component(component_id=<id>)`` (a confirmation-gated tool);
 - anything else → reply ``"Echo: <user message>"``.
 
+A user message starting with ``SLOW`` streams its words 0.2 s apart, long enough
+for tests to drop the connection or cancel the run mid-stream.
+
 Run standalone with ``uvicorn tests.fake_llm:app --port 9999``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -34,6 +38,8 @@ app = FastAPI(title="Fake OpenRouter")
 
 BUILD_PREFIX = "BUILD:"
 ARCHIVE_PREFIX = "ARCHIVE:"
+SLOW_PREFIX = "SLOW"
+SLOW_DELAY_SECONDS = 0.2
 FORM_NAME = re.compile(r'new agent named "([^"]+)"')
 
 
@@ -110,8 +116,10 @@ def _message(plan: dict[str, Any], call_id: str) -> dict[str, Any]:
     return {"role": "assistant", "content": plan["content"]}
 
 
-def _stream(plan: dict[str, Any], model: str, completion_id: str, call_id: str) -> Iterator[str]:
-    """Yield SSE ``chat.completion.chunk`` events for ``plan``."""
+async def _stream(
+    plan: dict[str, Any], model: str, completion_id: str, call_id: str, delay: float = 0.0
+) -> AsyncIterator[str]:
+    """Yield SSE ``chat.completion.chunk`` events for ``plan``, ``delay`` seconds apart per word."""
 
     def chunk(delta: dict[str, Any], finish: str | None = None, usage: bool = False) -> str:
         payload: dict[str, Any] = {
@@ -130,6 +138,7 @@ def _stream(plan: dict[str, Any], model: str, completion_id: str, call_id: str) 
         yield chunk({"tool_calls": [{"index": 0, **_tool_call(plan, call_id)}]})
     else:
         for word in plan["content"].split(" "):
+            await asyncio.sleep(delay)
             yield chunk({"content": word + " "})
     yield chunk({}, finish=_finish_reason(plan), usage=True)
     yield "data: [DONE]\n\n"
@@ -145,7 +154,10 @@ async def chat_completions(request: Request) -> Any:
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     call_id = f"call_{uuid.uuid4().hex[:12]}"
     if body.get("stream"):
-        return StreamingResponse(_stream(plan, model, completion_id, call_id), media_type="text/event-stream")
+        last_text = _text((body.get("messages") or [{}])[-1].get("content"))
+        delay = SLOW_DELAY_SECONDS if last_text.startswith(SLOW_PREFIX) else 0.0
+        stream = _stream(plan, model, completion_id, call_id, delay)
+        return StreamingResponse(stream, media_type="text/event-stream")
     return JSONResponse(
         {
             "id": completion_id,

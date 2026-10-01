@@ -157,7 +157,8 @@ const MessageView = memo(function MessageView({ message, streaming }: { message:
           <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{message.content}</ReactMarkdown>
         </div>
       )}
-      {thinking && <p className="muted small">Thinking…</p>}
+      {thinking && !message.notice && <p className="muted small">Thinking…</p>}
+      {message.notice && <p className="muted small notice">{message.notice}</p>}
       {message.error && (
         <p className="error" role="alert">
           {message.error}

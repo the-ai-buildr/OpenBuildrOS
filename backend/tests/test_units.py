@@ -35,11 +35,45 @@ class TestSettings:
         Settings(runtime_env="prd", openrouter_api_key="k", os_security_key="s").validate()
         Settings(runtime_env="dev").validate()
 
+    def test_resilience_settings_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OPENROUTER_MAX_RETRIES", "5")
+        monkeypatch.setenv("OPENROUTER_TIMEOUT", "30")
+        monkeypatch.setenv("OPENROUTER_FALLBACK_MODELS", "openai/gpt-4o, deepseek/deepseek-chat")
+        settings = Settings.from_env()
+        assert (settings.max_retries, settings.timeout_seconds) == (5, 30.0)
+        assert settings.fallback_models == ["openai/gpt-4o", "deepseek/deepseek-chat"]
+
+    def test_several_workers_need_redis_in_production(self) -> None:
+        with pytest.raises(RuntimeError, match="REDIS_URL"):
+            Settings(runtime_env="prd", openrouter_api_key="k", os_security_key="s", web_concurrency=2).validate()
+        Settings(
+            runtime_env="prd", openrouter_api_key="k", os_security_key="s", web_concurrency=2, redis_url="redis://r"
+        ).validate()
+
     def test_build_model_points_at_configured_endpoint(self, fake_llm: str) -> None:
         model = build_model("openai/gpt-4o")
         assert model.id == "openai/gpt-4o"
         assert model.base_url == fake_llm
         assert model.provider == "OpenRouter"
+        # Transient failures are retried by the OpenAI SDK; every call has a timeout.
+        assert model.max_retries == 3
+        assert model.timeout == 120.0
+
+
+class TestEventStream:
+    def test_in_memory_by_default_and_redis_when_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agno.os.event_streams.redis import RedisEventStream
+        from agno.run import cancel
+        from agno.run.cancellation_management.redis_cancellation_manager import RedisRunCancellationManager
+
+        from app.main import use_redis
+
+        assert use_redis(None) is None
+        # Keep the process-wide cancellation manager untouched for the other tests.
+        monkeypatch.setattr(cancel, "_cancellation_manager", cancel.get_cancellation_manager())
+        monkeypatch.setattr(cancel, "_cancellation_manager_explicitly_set", cancel._cancellation_manager_explicitly_set)
+        assert isinstance(use_redis("redis://localhost:6379/0"), RedisEventStream)
+        assert isinstance(cancel.get_cancellation_manager(), RedisRunCancellationManager)
 
 
 class TestDatabase:

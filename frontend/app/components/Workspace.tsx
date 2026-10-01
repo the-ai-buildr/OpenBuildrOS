@@ -4,19 +4,21 @@
  * The OpenBuildrOS workspace: agent sidebar, chat, and the "Create agent" dialog.
  *
  * Conversations are kept per agent in localStorage (messages plus the AgentOS
- * session id), so a reload resumes where the user left off.
+ * session id), so a reload resumes where the user left off. Runs reconnect on
+ * their own when the connection drops (see lib/resilient.ts).
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
   BUILDER_ID,
+  cancelRun,
   checkHealth,
   continueRun,
   listAgents,
   runAgent,
   type AgentSummary,
-  type EventsHandler,
+  type RunHandlers,
 } from '@/lib/api'
 import { applyEvents, newMessage, resolvePaused, type ChatMessage } from '@/lib/chat'
 
@@ -101,16 +103,26 @@ export function Workspace() {
 
   /** Run `stream` for `agentId`, folding each batch of events into the last message. */
   const drive = useCallback(
-    async (agentId: string, stream: (onEvents: EventsHandler, signal: AbortSignal) => Promise<void>) => {
+    async (agentId: string, stream: (handlers: RunHandlers) => Promise<void>) => {
       const controller = new AbortController()
       abortRef.current = controller
       setBusyAgent(agentId)
       try {
-        await stream((events) => patchLast(agentId, (message) => applyEvents(message, events)), controller.signal)
+        await stream({
+          onEvents: (events) => patchLast(agentId, (message) => applyEvents(message, events)),
+          onReconnect: (attempt, max) =>
+            patchLast(agentId, (message) => ({
+              ...message,
+              notice: `Connection lost. Reconnecting (${attempt}/${max})…`,
+            })),
+          signal: controller.signal,
+        })
       } catch (error) {
-        if (!(error instanceof DOMException && error.name === 'AbortError')) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          patchLast(agentId, (message) => ({ ...message, notice: 'Stopped.' }))
+        } else {
           const text = error instanceof Error ? error.message : String(error)
-          patchLast(agentId, (message) => ({ ...message, error: text }))
+          patchLast(agentId, (message) => ({ ...message, error: text, notice: undefined }))
         }
       } finally {
         patchLast(agentId, (message) => ({ ...message, done: true }))
@@ -129,7 +141,7 @@ export function Workspace() {
       ...all,
       [agentId]: { ...base, messages: [...base.messages, newMessage('user', text), newMessage('assistant')] },
     }))
-    void drive(agentId, (onEvents, signal) => runAgent(agentId, text, base.sessionId, onEvents, signal))
+    void drive(agentId, (handlers) => runAgent(agentId, text, base.sessionId, handlers))
   }
 
   const conversation = conversations[selectedId]
@@ -141,9 +153,23 @@ export function Workspace() {
     const agentId = selectedId
     patchLast(agentId, (message) => ({ ...message, paused: undefined, done: false }))
     const tools = resolvePaused(paused, approve)
-    void drive(agentId, (onEvents, signal) =>
-      continueRun(agentId, paused.runId, conversation.sessionId, tools, onEvents, signal),
-    )
+    void drive(agentId, (handlers) => continueRun(agentId, paused.runId, conversation.sessionId, tools, handlers))
+  }
+
+  /**
+   * Stop the streaming run. It runs detached on the server, so cancel it there and let
+   * its stream close with RunCancelled; abort locally only if that is not possible.
+   */
+  const stop = () => {
+    if (!busyAgent) return
+    const agentId = busyAgent
+    const runId = conversations[agentId]?.messages.at(-1)?.runId
+    if (!runId) {
+      abortRef.current?.abort()
+      return
+    }
+    patchLast(agentId, (message) => ({ ...message, notice: 'Stopping…' }))
+    cancelRun(agentId, runId).catch(() => abortRef.current?.abort())
   }
 
   const userAgents = agents.filter((agent) => agent.is_component)
@@ -166,7 +192,7 @@ export function Workspace() {
         busy={busyAgent === selectedId}
         locked={busyAgent !== null && busyAgent !== selectedId}
         onSend={(text) => send(selectedId, text)}
-        onStop={() => abortRef.current?.abort()}
+        onStop={stop}
         onDecide={decide}
         onReset={() =>
           setConversations((all) => {

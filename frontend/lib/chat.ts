@@ -29,7 +29,11 @@ export interface ChatMessage {
   content: string
   tools: ToolCall[]
   error?: string
+  /** Transient status, e.g. while reconnecting a dropped stream. */
+  notice?: string
   paused?: PausedRun
+  /** AgentOS run id, known once the run starts; used to cancel it. */
+  runId?: string
   done?: boolean
 }
 
@@ -66,6 +70,7 @@ function upsertTool(tools: ToolCall[], raw: EventTool, patch: Partial<ToolCall>)
  * @returns A new message; the input is never mutated.
  */
 export function applyEvent(message: ChatMessage, event: AgentEvent): ChatMessage {
+  if (!message.runId && typeof event.run_id === 'string') message = { ...message, runId: event.run_id }
   switch (event.event) {
     case 'RunContent': {
       const delta = typeof event.content === 'string' ? event.content : ''
@@ -91,8 +96,9 @@ export function applyEvent(message: ChatMessage, event: AgentEvent): ChatMessage
       return { ...message, content: message.content || final, done: true }
     }
     case 'RunError':
+      return { ...message, error: toText(event.content ?? event.error) || 'The run failed.', done: true }
     case 'RunCancelled':
-      return { ...message, error: toText(event.content ?? event.error) || event.event, done: true }
+      return { ...message, notice: 'Stopped.', done: true }
     default:
       return message
   }
@@ -100,7 +106,9 @@ export function applyEvent(message: ChatMessage, event: AgentEvent): ChatMessage
 
 /** Fold a batch of events, in order, into `message`. */
 export function applyEvents(message: ChatMessage, events: AgentEvent[]): ChatMessage {
-  return events.reduce(applyEvent, message)
+  // Fresh events mean the stream is live again: clear any reconnecting notice.
+  const live = message.notice && !message.done ? { ...message, notice: undefined } : message
+  return events.reduce(applyEvent, live)
 }
 
 /** The user's answer to a paused run: every gated tool confirmed or rejected together. */

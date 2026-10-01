@@ -72,14 +72,18 @@ All settings are environment variables; `.env.example` documents each one.
 | `UI_PASSWORD`, `UI_USERNAME` | recommended | HTTP Basic auth in front of the whole UI. |
 | `OPENROUTER_MODEL_ID` | no | Default model for every agent (default `anthropic/claude-sonnet-4.5`). Must support tool calling. |
 | `RUNTIME_ENV` | no | `prd` (default) refuses to start without the two keys; `dev` relaxes that and enables `/docs`. |
-| `WEB_CONCURRENCY` | no | uvicorn worker processes. |
+| `OPENROUTER_MAX_RETRIES`, `OPENROUTER_TIMEOUT` | no | Retries for transient model failures (default 3) and request timeout in seconds (default 120). |
+| `OPENROUTER_FALLBACK_MODELS` | no | Comma-separated models OpenRouter fails over to. |
+| `WEB_CONCURRENCY` | no | uvicorn worker processes. More than 1 requires `REDIS_URL`. |
+| `REDIS_URL` | with >1 worker | Shares resumable run streams across workers (`docker compose --profile scale up -d`). |
 | `CORS_ORIGINS` | no | Extra browser origins allowed to call the API directly. |
 
 ## APIs
 
 The backend is a standard AgentOS. Every endpoint needs `Authorization: Bearer $OS_SECURITY_KEY`.
 
-- **AgentOS REST**: `GET /agents`, `GET /palette` (tools new agents may use), `POST /agents/{id}/runs` (form fields `message`, `stream`, `session_id`,
+- **AgentOS REST**: `GET /agents`, `GET /palette` (tools new agents may use), resumable runs with
+  `background=true` + `/runs/{run_id}/resume` and `/cancel`, `POST /agents/{id}/runs` (form fields `message`, `stream`, `session_id`,
   `user_id`; SSE when streaming), `POST /agents/{id}/runs/{run_id}/continue`, sessions, traces, metrics,
   components. With `RUNTIME_ENV=dev`, interactive docs are at http://localhost:8000/docs. You can also connect the
   backend to [os.agno.com](https://os.agno.com).
@@ -95,11 +99,25 @@ curl -N -H "Authorization: Bearer $OS_SECURITY_KEY" \
   http://localhost:8000/agents/platform-manager/runs
 ```
 
+## Resilience
+
+- **Model calls.** Transient failures (connection errors, 408, 409, 429, 5xx) are retried by the OpenAI SDK with
+  exponential backoff, jitter, and `Retry-After`. The retry happens before any token streams, so output is never
+  duplicated. 4xx errors such as a bad key fail fast. Every request has a timeout, and OpenRouter can fail over to
+  `OPENROUTER_FALLBACK_MODELS`. There is no extra retry library: one layer, in the client that knows the protocol.
+- **Dropped streams.** The UI starts every run with `background=true`, so the agent keeps running on the server if
+  the browser disconnects. Each event carries an `event_index`. When a stream ends early or the network fails, the UI
+  calls AgentOS's `POST /agents/{id}/runs/{run_id}/resume` with the last index it saw. It retries up to five times
+  with exponential backoff and jitter, and shows "Reconnecting (n/5)…" meanwhile. Replayed events at or below that
+  index are dropped, so nothing repeats or goes missing (`frontend/lib/resilient.ts`). Completed runs are replayed
+  from the database once the in-memory buffer has expired.
+- **Stop** cancels the run on the server (`/cancel`), since aborting the request would leave a background run going.
+
 ## Production notes
 
 - Put the web service behind a TLS-terminating reverse proxy. Set `UI_PASSWORD`, or add your own SSO in front.
 - Both images run as non-root users and have health checks; Compose sets CPU and memory limits.
-- The UI proxy forwards only the five endpoints the UI uses (`frontend/lib/proxy-rules.ts`), not the whole
+- The UI proxy forwards only the endpoints the UI uses (`frontend/lib/proxy-rules.ts`), not the whole
   admin API, and stamps every run with the signed-in UI user (`UI_USERNAME`) so the browser cannot pick its
   own identity. Studio records that user as the owner of agents it builds.
 - Studio components, sessions, and traces live in Postgres. Back up the `pgdata` volume.

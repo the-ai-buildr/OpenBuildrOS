@@ -6,7 +6,10 @@
  * in the browser.
  */
 
-import { readEventStream, type AgentEvent } from './sse'
+import { HttpError, streamWithResume, type EventsHandler } from './resilient'
+import { readEventStream } from './sse'
+
+export type { EventsHandler } from './resilient'
 
 const BASE = '/api/os'
 
@@ -30,12 +33,9 @@ export interface PaletteTool {
   description?: string
 }
 
-/** Receives each batch of events from a streaming run. */
-export type EventsHandler = (events: AgentEvent[]) => void
-
 async function json<T>(path: string): Promise<T> {
   const response = await fetch(`${BASE}${path}`, { cache: 'no-store' })
-  if (!response.ok) throw new Error(`${path} failed: ${response.status} ${await response.text()}`)
+  if (!response.ok) throw new HttpError(response.status, `${path} failed: ${response.status} ${await response.text()}`)
   return (await response.json()) as T
 }
 
@@ -58,40 +58,65 @@ export async function checkHealth(): Promise<boolean> {
   }
 }
 
-/**
- * POST a streaming form to `/agents/{agentId}/runs{suffix}` and feed its events to `onEvents`.
- *
- * @param fields - Endpoint-specific form fields; `session_id` and `stream` are added here.
- * @param signal - Aborts the request (and with it the run) when fired.
- */
-async function streamRun(
+/** Callbacks and cancellation for a streaming run. */
+export interface RunHandlers {
+  onEvents: EventsHandler
+  /** A dropped connection is being retried (1-based attempt). */
+  onReconnect?: (attempt: number, maxAttempts: number) => void
+  signal: AbortSignal
+}
+
+/** POST a form under `/agents/{agentId}/runs` and feed the SSE response to `onEvents`. */
+async function postStream(
   agentId: string,
   suffix: string,
-  sessionId: string,
   fields: Record<string, string>,
   onEvents: EventsHandler,
-  signal?: AbortSignal,
+  signal: AbortSignal,
 ): Promise<void> {
   const form = new FormData()
-  for (const [key, value] of Object.entries({ ...fields, session_id: sessionId, stream: 'true' })) form.set(key, value)
+  for (const [key, value] of Object.entries(fields)) form.set(key, value)
   const response = await fetch(`${BASE}/agents/${encodeURIComponent(agentId)}/runs${suffix}`, {
     method: 'POST',
     body: form,
     signal,
   })
-  if (!response.ok) throw new Error(`Run failed: ${response.status} ${await response.text()}`)
+  if (!response.ok) throw new HttpError(response.status, `Run failed: ${response.status} ${await response.text()}`)
   await readEventStream(response, onEvents)
 }
 
-/** Start a streaming run of `agentId` with the user's `message` in conversation `sessionId`. */
-export function runAgent(
+/**
+ * Stream a run whose first request is `first`, reconnecting through `/resume` on drops.
+ *
+ * `background=true` keeps the run going on the server while the browser is disconnected.
+ */
+function resilientRun(
   agentId: string,
-  message: string,
   sessionId: string,
-  onEvents: EventsHandler,
-  signal?: AbortSignal,
+  first: { suffix: string; fields: Record<string, string> },
+  { onEvents, onReconnect, signal }: RunHandlers,
 ): Promise<void> {
-  return streamRun(agentId, '', sessionId, { message }, onEvents, signal)
+  const common = { session_id: sessionId, stream: 'true' }
+  return streamWithResume({
+    start: (handler, s) =>
+      postStream(agentId, first.suffix, { ...first.fields, ...common, background: 'true' }, handler, s),
+    resume: (runId, lastIndex, handler, s) =>
+      postStream(
+        agentId,
+        `/${encodeURIComponent(runId)}/resume`,
+        { session_id: sessionId, last_event_index: String(lastIndex) },
+        handler,
+        s,
+      ),
+    onEvents,
+    onReconnect,
+    signal,
+  })
+}
+
+/** Start a run of `agentId` with the user's `message` in conversation `sessionId`. */
+export function runAgent(agentId: string, message: string, sessionId: string, handlers: RunHandlers): Promise<void> {
+  return resilientRun(agentId, sessionId, { suffix: '', fields: { message } }, handlers)
 }
 
 /**
@@ -104,9 +129,15 @@ export function continueRun(
   runId: string,
   sessionId: string,
   tools: Record<string, unknown>[],
-  onEvents: EventsHandler,
-  signal?: AbortSignal,
+  handlers: RunHandlers,
 ): Promise<void> {
-  const suffix = `/${encodeURIComponent(runId)}/continue`
-  return streamRun(agentId, suffix, sessionId, { tools: JSON.stringify(tools) }, onEvents, signal)
+  const first = { suffix: `/${encodeURIComponent(runId)}/continue`, fields: { tools: JSON.stringify(tools) } }
+  return resilientRun(agentId, sessionId, first, handlers)
+}
+
+/** Stop a run on the server. Aborting the request alone would leave a background run going. */
+export async function cancelRun(agentId: string, runId: string): Promise<void> {
+  const path = `/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}/cancel`
+  const response = await fetch(`${BASE}${path}`, { method: 'POST', body: new FormData() })
+  if (!response.ok) throw new HttpError(response.status, `Cancel failed: ${response.status}`)
 }

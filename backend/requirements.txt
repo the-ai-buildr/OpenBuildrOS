@@ -180,6 +180,8 @@ pyyaml==6.0.3
     # via agno
 questionary==2.1.1
     # via agnoctl
+redis==8.1.0
+    # via -r requirements.in
 requests==2.34.2
     # via google-api-core
 rich==15.0.0

@@ -14,7 +14,7 @@ const ALLOWED: ReadonlyArray<readonly [method: string, pattern: RegExp]> = [
   ['GET', /^agents$/],
   ['GET', /^palette$/],
   ['POST', new RegExp(`^agents/${SEGMENT}/runs$`)],
-  ['POST', new RegExp(`^agents/${SEGMENT}/runs/${SEGMENT}/continue$`)],
+  ['POST', new RegExp(`^agents/${SEGMENT}/runs/${SEGMENT}/(continue|resume|cancel)$`)],
 ]
 
 /**

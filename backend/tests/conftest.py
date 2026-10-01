@@ -14,6 +14,8 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
 
 import pytest
 import uvicorn
@@ -40,22 +42,42 @@ os.environ.update(
 os.environ.pop("OS_SECURITY_KEY", None)
 
 
-@pytest.fixture(scope="session", autouse=True)
-def fake_llm() -> Iterator[str]:
-    """Serve the fake OpenRouter for the whole session and yield its base URL."""
-    from tests.fake_llm import app as fake_app
-
-    server = uvicorn.Server(uvicorn.Config(fake_app, host="127.0.0.1", port=FAKE_LLM_PORT, log_level="warning"))
+@contextmanager
+def serve(app: Any, port: int) -> Iterator[str]:
+    """Run an ASGI app on a real uvicorn server in a thread and yield its base URL."""
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     deadline = time.time() + 10
     while not server.started:
         if time.time() > deadline:
-            raise RuntimeError("fake LLM did not start")
+            raise RuntimeError(f"server on port {port} did not start")
         time.sleep(0.05)
-    yield f"http://127.0.0.1:{FAKE_LLM_PORT}"
+    yield f"http://127.0.0.1:{port}"
     server.should_exit = True
     thread.join(timeout=5)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def fake_llm() -> Iterator[str]:
+    """Serve the fake OpenRouter for the whole session and yield its base URL."""
+    from tests.fake_llm import app as fake_app
+
+    with serve(fake_app, FAKE_LLM_PORT) as url:
+        yield url
+
+
+@pytest.fixture(scope="session")
+def live_server(fake_llm: str) -> Iterator[str]:
+    """The real OpenBuildrOS app on a real server.
+
+    Starlette's TestClient buffers a whole streamed response before returning it,
+    so tests that must drop a connection mid-stream talk to this instead.
+    """
+    from app.main import app
+
+    with serve(app, _free_port()) as url:
+        yield url
 
 
 @pytest.fixture(scope="session")

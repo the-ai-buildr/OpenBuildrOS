@@ -76,6 +76,19 @@ describe('applyEvent', () => {
     expect(resolvePaused(message.paused!, false)).toEqual([{ ...tool, confirmed: false }])
   })
 
+  it('records the run id and marks a cancelled run as stopped', () => {
+    let message = applyEvent(newMessage('assistant'), { event: 'RunStarted', run_id: 'r9' })
+    expect(message.runId).toBe('r9')
+    message = applyEvent(message, { event: 'RunCancelled', run_id: 'r9' })
+    expect(message.notice).toBe('Stopped.')
+    expect(message.error).toBeUndefined()
+  })
+
+  it('clears a reconnecting notice when events flow again', () => {
+    const reconnecting = { ...newMessage('assistant'), notice: 'Reconnecting (1/5)…' }
+    expect(applyEvents(reconnecting, [{ event: 'RunContent', content: 'x' }]).notice).toBeUndefined()
+  })
+
   it('surfaces run errors and failed tools', () => {
     const errored = applyEvent(newMessage('assistant'), { event: 'RunError', content: 'boom' })
     expect(errored.error).toBe('boom')
@@ -109,6 +122,9 @@ describe('proxy rules', () => {
     expect(isAllowed('GET', 'registry')).toBe(false)
     expect(isAllowed('POST', 'agents/platform-builder/runs')).toBe(true)
     expect(isAllowed('POST', 'agents/x/runs/abc-123/continue')).toBe(true)
+    expect(isAllowed('POST', 'agents/x/runs/abc-123/resume')).toBe(true)
+    expect(isAllowed('POST', 'agents/x/runs/abc-123/cancel')).toBe(true)
+    expect(isAllowed('POST', 'agents/x/runs/abc-123/fork')).toBe(false)
     expect(isAllowed('DELETE', 'agents')).toBe(false)
     expect(isAllowed('GET', 'sessions')).toBe(false)
     expect(isAllowed('POST', 'agents/../config/runs')).toBe(false)

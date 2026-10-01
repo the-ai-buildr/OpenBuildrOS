@@ -19,6 +19,19 @@ services:
       retries: 20
     networks: [internal]
 
+  # Optional: shares resumable run streams across backend workers.
+  #   docker compose --profile scale up -d   with REDIS_URL=redis://redis:6379/0
+  redis:
+    image: redis:7-alpine
+    profiles: [scale]
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+    networks: [internal]
+
   backend:
     build:
       context: ./backend
@@ -33,8 +46,13 @@ services:
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-}
       OS_SECURITY_KEY: ${OS_SECURITY_KEY:-}
       DATABASE_URL: postgresql+psycopg://${DB_USER:-openbuildr}:${DB_PASSWORD}@db:5432/${DB_NAME:-openbuildr}
+      OPENROUTER_MAX_RETRIES: ${OPENROUTER_MAX_RETRIES:-}
+      OPENROUTER_TIMEOUT: ${OPENROUTER_TIMEOUT:-}
+      OPENROUTER_FALLBACK_MODELS: ${OPENROUTER_FALLBACK_MODELS:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
+      # Set to redis://redis:6379/0 (and start the "scale" profile) for WEB_CONCURRENCY > 1.
+      REDIS_URL: ${REDIS_URL:-}
     # Published on localhost only: the UI reaches it over the internal network.
     # Remove the mapping entirely if nothing outside the stack needs the API.
     ports:

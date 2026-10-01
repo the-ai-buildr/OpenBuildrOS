@@ -2,3 +2,4 @@
 agno[os,a2a,agui,openai,postgres,sqlite]==3.0.11
 ddgs
 greenlet
+redis

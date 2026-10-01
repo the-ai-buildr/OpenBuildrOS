@@ -12,11 +12,18 @@ Builds the FastAPI app that serves:
 - an A2A server for every agent under ``/a2a``;
 - ``GET /palette``: the tools Platform Builder may wire into new agents.
 
+Runs started with ``background=true`` survive client disconnects; their events
+carry an ``event_index`` and can be replayed with
+``POST /agents/{id}/runs/{run_id}/resume``, and ``/cancel`` stops them. The replay
+buffer and the cancellation registry are in memory by default and in Redis when
+``REDIS_URL`` is set (required for several workers).
+
 Run locally with ``uvicorn app.main:app --reload``.
 """
 
 from agno.os import AgentOS
 from agno.os.auth import get_authentication_dependency
+from agno.os.event_streams import BaseEventStream
 from agno.os.interfaces.agui import AGUI
 from agno.os.settings import AgnoAPISettings
 from agno.tools import Toolkit
@@ -34,6 +41,36 @@ settings.validate()
 
 # Defined in code, always served, and never editable from Studio.
 ADMIN_AGENTS: list = [platform_builder, platform_manager, platform_engineer]
+
+
+def use_redis(redis_url: str | None) -> BaseEventStream | None:
+    """Share run state across workers through Redis when ``redis_url`` is set.
+
+    Two pieces must be shared, or a request landing on another worker cannot find
+    the run: the event buffer that ``/resume`` replays from, and the cancellation
+    registry that ``/cancel`` writes to (installed globally here).
+
+    Args:
+        redis_url: ``redis://...``, or ``None`` to keep AgentOS's in-memory defaults.
+
+    Returns:
+        The Redis-backed event stream for AgentOS, or ``None``.
+    """
+    if not redis_url:
+        return None
+    from agno.os.event_streams.redis import RedisEventStream
+    from agno.run.cancel import set_cancellation_manager
+    from agno.run.cancellation_management.redis_cancellation_manager import RedisRunCancellationManager
+    from redis import Redis
+    from redis.asyncio import Redis as AsyncRedis
+
+    set_cancellation_manager(
+        RedisRunCancellationManager(
+            redis_client=Redis.from_url(redis_url), async_redis_client=AsyncRedis.from_url(redis_url)
+        )
+    )
+    return RedisEventStream(AsyncRedis.from_url(redis_url))
+
 
 api_settings = AgnoAPISettings(
     env=settings.runtime_env,
@@ -78,6 +115,7 @@ agent_os = AgentOS(
     telemetry=False,
     settings=api_settings,
     base_app=base_app,
+    event_stream=use_redis(settings.redis_url),
 )
 app = agent_os.get_app()
 

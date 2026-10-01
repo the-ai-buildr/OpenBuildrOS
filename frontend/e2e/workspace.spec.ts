@@ -57,3 +57,47 @@ test('the proxy refuses endpoints the UI does not use', async ({ request }) => {
   expect((await request.get('/api/os/sessions')).status()).toBe(404)
   expect((await request.delete('/api/os/agents')).status()).toBe(405)
 })
+
+test('a dropped stream reconnects and finishes without losing or repeating output', async ({ page }) => {
+  const message = 'SLOW reconnect one two three four five'
+  let cut = false
+  const resumes: string[] = []
+  page.on('request', (request) => {
+    if (request.url().endsWith('/resume')) resumes.push(request.url())
+  })
+  // Simulate a network drop: deliver the first run stream only up to its first token.
+  await page.route(/\/api\/os\/agents\/platform-manager\/runs$/, async (route) => {
+    if (cut) return route.continue()
+    cut = true
+    const response = await route.fetch()
+    const body = await response.text()
+    const frames = body.split('\n\n')
+    const firstToken = frames.findIndex((frame) => frame.includes('"event":"RunContent"'))
+    await route.fulfill({ response, body: frames.slice(0, firstToken + 1).join('\n\n') + '\n\n' })
+  })
+
+  await page.goto('/')
+  await page.getByRole('navigation', { name: 'Admin agents' }).getByText('Platform Manager', { exact: true }).click()
+  await page.getByLabel('Message').fill(message)
+  await page.getByLabel('Message').press('Enter')
+
+  const reply = page.locator('.message.assistant').last()
+  await expect(reply).toHaveText(`Echo: ${message}`)
+  await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+  expect(resumes).toHaveLength(1)
+})
+
+test('Stop cancels the run on the server', async ({ page }) => {
+  const words = Array.from({ length: 30 }, (_, i) => `w${i}`).join(' ')
+  await page.goto('/')
+  await page.getByRole('navigation', { name: 'Admin agents' }).getByText('Platform Engineer', { exact: true }).click()
+  await page.getByRole('button', { name: 'New chat' }).click()
+  await page.getByLabel('Message').fill(`SLOW ${words}`)
+  await page.getByLabel('Message').press('Enter')
+
+  const reply = page.locator('.message.assistant').last()
+  await expect(reply).toContainText('w2')
+  await page.getByRole('button', { name: 'Stop' }).click()
+  await expect(reply).toContainText('Stopped.')
+  await expect(reply).not.toContainText('w29')
+})
