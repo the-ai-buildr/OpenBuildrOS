@@ -63,18 +63,6 @@ def test_palette_lists_only_declared_tools(client: TestClient) -> None:
     assert names == ["calculator", "websearch", "file_generation"]
 
 
-def test_builder_cannot_compose_teams_or_workflows(client: TestClient) -> None:
-    from agno.tools.studio import StudioTools
-
-    from agents.builder import platform_builder
-
-    assert isinstance(platform_builder.tools, list)
-    studio = next(tool for tool in platform_builder.tools if isinstance(tool, StudioTools))
-    studio_functions = set(studio.functions)
-    assert "create_agent" in studio_functions
-    assert not {"create_team", "create_workflow"} & studio_functions
-
-
 def test_admin_agent_streams_a_reply(client: TestClient) -> None:
     events = run_stream(client, "platform-manager", "status?")
     kinds = [event["event"] for event in events]

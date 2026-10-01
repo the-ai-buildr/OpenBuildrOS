@@ -1,21 +1,22 @@
 'use client'
 
-import type { AgentSummary } from '@/lib/api'
+import { entityKey, type Entity } from '@/lib/api'
 
 interface SidebarProps {
-  adminAgents: AgentSummary[]
-  userAgents: AgentSummary[]
-  selectedId: string
+  entities: Entity[]
+  selectedKey: string
   /** null while the first health check is in flight. */
   healthy: boolean | null
   loadError: string | null
-  onSelect: (agentId: string) => void
+  onSelect: (key: string) => void
   onCreate: () => void
+  onRoutines: () => void
 }
 
-/** Agent navigation: admin agents first, then everything built with Platform Builder. */
-export function Sidebar({ adminAgents, userAgents, selectedId, healthy, loadError, onSelect, onCreate }: SidebarProps) {
+/** Navigation: the admin agents, then everything built with Platform Builder, grouped by kind. */
+export function Sidebar({ entities, selectedKey, healthy, loadError, onSelect, onCreate, onRoutines }: SidebarProps) {
   const status = healthy === null ? 'checking' : healthy ? 'online' : 'offline'
+  const built = (kind: Entity['kind']) => entities.filter((entity) => entity.kind === kind && entity.is_component)
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -28,54 +29,67 @@ export function Sidebar({ adminAgents, userAgents, selectedId, healthy, loadErro
       </div>
 
       <button className="primary create" onClick={onCreate}>
-        + Create agent
+        + Create
       </button>
 
-      <AgentGroup title="Admin agents" agents={adminAgents} selectedId={selectedId} onSelect={onSelect} />
-      <AgentGroup
-        title="Your agents"
-        agents={userAgents}
-        selectedId={selectedId}
+      <Group
+        title="Admin agents"
+        entities={entities.filter((entity) => entity.kind === 'agents' && !entity.is_component)}
+        selectedKey={selectedKey}
         onSelect={onSelect}
-        empty="Nothing built yet. Use Create agent or ask Platform Builder."
       />
+      <Group
+        title="Agents"
+        entities={built('agents')}
+        selectedKey={selectedKey}
+        onSelect={onSelect}
+        empty="Nothing built yet. Use Create or ask Platform Builder."
+      />
+      <Group title="Teams" entities={built('teams')} selectedKey={selectedKey} onSelect={onSelect} />
+      <Group title="Workflows" entities={built('workflows')} selectedKey={selectedKey} onSelect={onSelect} />
 
       {loadError && (
         <p className="sidebar-error" role="alert">
-          Could not load agents: {loadError}
+          {loadError}
         </p>
       )}
-      <div className={`status status-${status}`} data-testid="backend-status">
-        <span className="dot" aria-hidden /> AgentOS {status}
+      <div className="sidebar-footer">
+        <button className="ghost small" onClick={onRoutines}>
+          Routines
+        </button>
+        <div className={`status status-${status}`} data-testid="backend-status">
+          <span className="dot" aria-hidden /> AgentOS {status}
+        </div>
       </div>
     </aside>
   )
 }
 
-interface AgentGroupProps {
+interface GroupProps {
   title: string
-  agents: AgentSummary[]
-  selectedId: string
-  onSelect: (agentId: string) => void
+  entities: Entity[]
+  selectedKey: string
+  onSelect: (key: string) => void
   empty?: string
 }
 
-function AgentGroup({ title, agents, selectedId, onSelect, empty }: AgentGroupProps) {
+function Group({ title, entities, selectedKey, onSelect, empty }: GroupProps) {
+  if (!entities.length && !empty) return null
   return (
     <nav className="agent-group" aria-label={title}>
       <h2>{title}</h2>
-      {agents.length === 0 && empty && <p className="muted small">{empty}</p>}
+      {entities.length === 0 && <p className="muted small">{empty}</p>}
       <ul>
-        {agents.map((agent) => (
-          <li key={agent.id}>
+        {entities.map((entity) => (
+          <li key={entityKey(entity)}>
             <button
-              className={`agent-item ${agent.id === selectedId ? 'active' : ''}`}
-              onClick={() => onSelect(agent.id)}
-              title={agent.description}
-              data-agent-id={agent.id}
+              className={`agent-item ${entityKey(entity) === selectedKey ? 'active' : ''}`}
+              onClick={() => onSelect(entityKey(entity))}
+              title={entity.description}
+              data-entity={entityKey(entity)}
             >
-              <span className="agent-name">{agent.name}</span>
-              {agent.description && <span className="agent-desc">{agent.description}</span>}
+              <span className="agent-name">{entity.name}</span>
+              {entity.description && <span className="agent-desc">{entity.description}</span>}
             </button>
           </li>
         ))}

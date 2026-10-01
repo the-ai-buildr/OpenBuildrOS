@@ -120,6 +120,18 @@ class TestFakeModelScript:
         }
         assert plan_reply(body)["tool_call"]["arguments"]["name"] == "Scout"
 
+    def test_ui_form_prompts_for_teams_and_workflows(self) -> None:
+        team = (
+            'Build and publish a new team named "Desk".\nPurpose: p\n'
+            "Members (exact agent ids): writer, critic. The team leader delegates to them."
+        )
+        offered = [{"function": {"name": "create_team"}}, {"function": {"name": "create_workflow"}}]
+        call = plan_reply({"messages": [{"role": "user", "content": team}], "tools": offered})["tool_call"]
+        assert call["name"] == "create_team" and call["arguments"]["member_ids"] == ["writer", "critic"]
+        flow = 'Build and publish a new workflow named "P".\nSteps in order (exact agent ids, one step each): a, b.'
+        call = plan_reply({"messages": [{"role": "user", "content": flow}], "tools": offered})["tool_call"]
+        assert [step["agent_id"] for step in call["arguments"]["steps"]] == ["a", "b"]
+
     def test_archive_calls_the_gated_tool(self) -> None:
         body = {
             "messages": [{"role": "user", "content": "ARCHIVE: scout"}],

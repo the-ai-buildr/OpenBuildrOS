@@ -15,6 +15,12 @@ from app.settings import build_model
 # Identity fallback for runs that carry no user_id (the UI proxy always sends one).
 DEFAULT_USER_ID = "admin"
 
+BUILDER_ID = "platform-builder"
+MANAGER_ID = "platform-manager"
+ENGINEER_ID = "platform-engineer"
+# Code-defined admin agents: never composable into user-built teams or workflows.
+ADMIN_AGENT_IDS = frozenset({BUILDER_ID, MANAGER_ID, ENGINEER_ID})
+
 
 def admin_agent(**kwargs: Any) -> Agent:
     """Build an admin agent with the platform's shared defaults.

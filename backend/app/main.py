@@ -10,7 +10,8 @@ Builds the FastAPI app that serves:
   every agent published at runtime through Studio;
 - AG-UI endpoints for each admin agent at ``POST /ag-ui/{agent_id}/agui``;
 - an A2A server for every agent under ``/a2a``;
-- ``GET /palette``: the tools Platform Builder may wire into new agents.
+- ``GET /palette``: the tools Platform Builder may wire into new agents;
+- the scheduler, which fires Studio-created schedules against this API.
 
 Runs started with ``background=true`` survive client disconnects; their events
 carry an ``event_index`` and can be replayed with
@@ -111,6 +112,8 @@ agent_os = AgentOS(
     registry=registry,
     interfaces=[AGUI(agent=agent, prefix=f"/ag-ui/{agent.id}") for agent in ADMIN_AGENTS],
     a2a_interface=True,
+    scheduler=True,
+    scheduler_base_url=settings.agentos_url,
     tracing=True,
     telemetry=False,
     settings=api_settings,

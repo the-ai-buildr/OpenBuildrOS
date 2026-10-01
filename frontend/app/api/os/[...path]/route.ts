@@ -3,11 +3,11 @@
  *
  * Forwards allowlisted requests to `BACKEND_URL` with the server-only
  * `OS_SECURITY_KEY` as a bearer token, and streams responses (SSE included)
- * straight back to the browser. Run requests get their `user_id` set here from
- * the authenticated UI user, so the browser cannot claim another identity.
+ * straight back to the browser. Run requests and session reads get their `user_id`
+ * set here from the authenticated UI user, so the browser cannot claim another identity.
  */
 
-import { isAllowed, uiUserId } from '@/lib/proxy-rules'
+import { isAllowed, isUserScoped, uiUserId } from '@/lib/proxy-rules'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -35,7 +35,10 @@ async function forward(request: Request, context: Context): Promise<Response> {
     body.set('user_id', uiUserId())
   }
 
-  const search = new URL(request.url).search
+  const query = new URL(request.url).searchParams
+  // Never trust a user_id from the browser: listings and history are the signed-in user's own.
+  if (isUserScoped(path)) query.set('user_id', uiUserId())
+  const search = query.size ? `?${query}` : ''
   let upstream: Response
   try {
     // fetch sets the multipart content-type (with its boundary) for FormData bodies.

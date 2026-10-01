@@ -65,6 +65,7 @@ class Settings:
             ``web_concurrency`` > 1 in production; without it a resume can land on a worker that
             never saw the run.
         web_concurrency: uvicorn worker count (``WEB_CONCURRENCY``).
+        agentos_url: This backend's own base URL; the scheduler calls it to fire scheduled runs.
     """
 
     runtime_env: str = "prd"
@@ -80,6 +81,7 @@ class Settings:
     cors_origins: list[str] = field(default_factory=list)
     redis_url: str | None = None
     web_concurrency: int = 1
+    agentos_url: str = "http://127.0.0.1:8000"
 
     @property
     def is_dev(self) -> bool:
@@ -103,6 +105,7 @@ class Settings:
             cors_origins=_split_csv(getenv("CORS_ORIGINS")),
             redis_url=getenv("REDIS_URL") or None,
             web_concurrency=int(getenv("WEB_CONCURRENCY") or 1),
+            agentos_url=getenv("AGENTOS_URL") or "http://127.0.0.1:8000",
         )
 
     def validate(self) -> None:

@@ -9,10 +9,8 @@
  * the transcript never repeats or skips output.
  */
 
+import { normalizeEvent, TERMINAL_EVENTS } from './events'
 import type { AgentEvent } from './sse'
-
-/** Events after which a run's stream is complete and must not be resumed. */
-export const TERMINAL_EVENTS = new Set(['RunCompleted', 'RunError', 'RunCancelled', 'RunPaused'])
 
 /** A non-2xx HTTP answer. 4xx responses are final; 5xx and network failures are retried. */
 export class HttpError extends Error {
@@ -94,7 +92,9 @@ export async function streamWithResume({
       if (index !== undefined && index <= lastIndex) return false
       if (index !== undefined) lastIndex = index
       if (typeof event.run_id === 'string') runId ??= event.run_id
-      if (TERMINAL_EVENTS.has(event.event)) finished = true
+      // Team and workflow streams carry their members' runs too: only the top-level run ends the stream.
+      const ownRun = typeof event.run_id !== 'string' || event.run_id === runId
+      if (ownRun && TERMINAL_EVENTS.has(normalizeEvent(event.event))) finished = true
       return true
     })
     if (fresh.length) onEvents(fresh)

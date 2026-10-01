@@ -4,17 +4,20 @@ import { memo, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
-import { BUILDER_ID, ENGINEER_ID, MANAGER_ID, type AgentSummary } from '@/lib/api'
+import { BUILDER_ID, ENGINEER_ID, MANAGER_ID, type Channel, type Entity } from '@/lib/api'
 import type { ChatMessage, ToolCall } from '@/lib/chat'
 
 const REMARK_PLUGINS = [remarkGfm]
 
-/** Starter prompts for the admin agents; user-built agents start empty. */
+const KIND_LABEL: Record<Entity['kind'], string> = { agents: 'Agent', teams: 'Team', workflows: 'Workflow' }
+
+/** Starter prompts for the admin agents; user-built components start empty. */
 const STARTERS: Record<string, string[]> = {
   [BUILDER_ID]: [
     'What can you build?',
     'Build a research agent that searches the web and cites sources',
     'Build a calculator agent that explains each step',
+    'Build a team of a researcher and an editor that writes cited briefs',
   ],
   [MANAGER_ID]: [
     'Is the platform healthy?',
@@ -29,21 +32,40 @@ const STARTERS: Record<string, string[]> = {
 }
 
 interface ChatViewProps {
-  agentId: string
-  agent?: AgentSummary
+  entity?: Entity
+  /** Id of the selected entity, shown while its listing loads. */
+  entityId: string
+  /** The user's conversations with this entity, newest first. */
+  channels: Channel[]
+  /** The open conversation. */
+  sessionId?: string
   messages: ChatMessage[]
-  /** A run for this agent is streaming. */
+  /** A run in this conversation is streaming. */
   busy: boolean
-  /** Another agent is streaming; sending is disabled until it finishes. */
+  /** Another conversation is streaming; sending is disabled until it finishes. */
   locked: boolean
   onSend: (text: string) => void
   onStop: () => void
   onDecide: (approve: boolean) => void
-  onReset: () => void
+  onOpenChannel: (sessionId: string) => void
+  onNewChannel: () => void
 }
 
-/** Transcript and composer for the selected agent. */
-export function ChatView({ agentId, agent, messages, busy, locked, onSend, onStop, onDecide, onReset }: ChatViewProps) {
+/** A channel with one agent, team, or workflow: its transcript, channel switcher, and composer. */
+export function ChatView({
+  entity,
+  entityId,
+  channels,
+  sessionId,
+  messages,
+  busy,
+  locked,
+  onSend,
+  onStop,
+  onDecide,
+  onOpenChannel,
+  onNewChannel,
+}: ChatViewProps) {
   const [draft, setDraft] = useState('')
   const endRef = useRef<HTMLDivElement>(null)
   const last = messages.at(-1)
@@ -63,23 +85,38 @@ export function ChatView({ agentId, agent, messages, busy, locked, onSend, onSto
     <main className="chat">
       <header className="chat-header">
         <div>
-          <h1>{agent?.name ?? agentId}</h1>
+          <h1>{entity?.name ?? entityId}</h1>
           <p className="muted small">
-            {agent?.is_component ? 'Built with Platform Builder' : 'Admin agent'}
-            {agent?.model?.model ? ` · ${agent.model.model}` : ''}
+            {entity?.is_component ? `${KIND_LABEL[entity.kind]} · built with Platform Builder` : 'Admin agent'}
+            {entity?.model?.model ? ` · ${entity.model.model}` : ''}
           </p>
         </div>
-        <button className="ghost" onClick={onReset} disabled={busy}>
-          New chat
-        </button>
+        <div className="channel-bar">
+          <select
+            aria-label="Channel"
+            value={channels.some((channel) => channel.session_id === sessionId) ? sessionId : ''}
+            onChange={(event) => event.target.value && onOpenChannel(event.target.value)}
+            disabled={busy}
+          >
+            <option value="">{channels.some((c) => c.session_id === sessionId) ? 'Channels' : 'New channel'}</option>
+            {channels.map((channel) => (
+              <option key={channel.session_id} value={channel.session_id}>
+                {channel.session_name || channel.session_id.slice(0, 8)}
+              </option>
+            ))}
+          </select>
+          <button className="ghost" onClick={onNewChannel} disabled={busy}>
+            New chat
+          </button>
+        </div>
       </header>
 
       <section className="transcript" aria-live="polite">
         {messages.length === 0 && (
           <div className="empty">
-            <p>{agent?.description ?? 'Start a conversation.'}</p>
+            <p>{entity?.description ?? 'Start a conversation.'}</p>
             <div className="starters">
-              {(STARTERS[agentId] ?? []).map((prompt) => (
+              {(STARTERS[entityId] ?? []).map((prompt) => (
                 <button key={prompt} className="chip" onClick={() => submit(prompt)} disabled={locked}>
                   {prompt}
                 </button>
@@ -113,7 +150,7 @@ export function ChatView({ agentId, agent, messages, busy, locked, onSend, onSto
       >
         <textarea
           aria-label="Message"
-          placeholder={locked ? 'Another agent is responding…' : `Message ${agent?.name ?? 'the agent'}…`}
+          placeholder={locked ? 'Another conversation is running…' : `Message ${entity?.name ?? entityId}…`}
           value={draft}
           rows={2}
           onChange={(event) => setDraft(event.target.value)}
@@ -175,11 +212,16 @@ const STATUS_LABEL: Record<ToolCall['status'], string> = {
   'awaiting-approval': 'needs approval',
 }
 
+/** How each kind of activity line reads: a tool call, a delegated team member, a workflow step. */
+const ACTIVITY_PREFIX: Record<NonNullable<ToolCall['kind']>, string> = { tool: '', member: '→ ', step: 'Step: ' }
+
 function ToolChip({ tool }: { tool: ToolCall }) {
+  const kind = tool.kind ?? 'tool'
   return (
     <li>
-      <details className={`tool tool-${tool.status}`}>
+      <details className={`tool tool-${tool.status} activity-${kind}`}>
         <summary>
+          {ACTIVITY_PREFIX[kind]}
           <code>{tool.name}</code> <span className="small">{STATUS_LABEL[tool.status]}</span>
         </summary>
         {tool.args && <pre>{JSON.stringify(tool.args, null, 2)}</pre>}

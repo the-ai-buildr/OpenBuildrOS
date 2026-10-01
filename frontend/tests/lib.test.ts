@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import { applyEvent, applyEvents, buildCreatePrompt, newMessage, resolvePaused } from '../lib/chat'
-import { isAllowed, isAuthorizedBasic, safeEqual } from '../lib/proxy-rules'
+import { applyEvent, applyEvents, buildCreatePrompt, newMessage, resolvePaused, runsToMessages } from '../lib/chat'
+import { normalizeEvent } from '../lib/events'
+import { isAllowed, isAuthorizedBasic, isUserScoped, safeEqual } from '../lib/proxy-rules'
 import { SSEParser, parseFrame, readEventStream, type AgentEvent } from '../lib/sse'
 
 describe('SSEParser', () => {
@@ -100,10 +101,59 @@ describe('applyEvent', () => {
   })
 })
 
+describe('team and workflow streams', () => {
+  it('normalizes team and workflow event names', () => {
+    expect(normalizeEvent('TeamRunContent')).toBe('RunContent')
+    expect(normalizeEvent('TeamToolCallStarted')).toBe('ToolCallStarted')
+    expect(normalizeEvent('WorkflowCompleted')).toBe('RunCompleted')
+    expect(normalizeEvent('StepStarted')).toBe('StepStarted')
+  })
+
+  it('shows a delegated member as activity, not as reply text', () => {
+    let message = applyEvent(newMessage('assistant'), { event: 'TeamRunStarted', run_id: 'team-run' })
+    message = applyEvent(message, { event: 'RunStarted', run_id: 'm1', agent_name: 'Writer' })
+    message = applyEvent(message, { event: 'RunContent', run_id: 'm1', content: 'member text' })
+    message = applyEvent(message, { event: 'RunCompleted', run_id: 'm1', content: 'draft' })
+    message = applyEvent(message, { event: 'TeamRunContent', run_id: 'team-run', content: 'final' })
+    message = applyEvent(message, { event: 'TeamRunCompleted', run_id: 'team-run' })
+    expect(message.content).toBe('final')
+    expect(message.tools).toEqual([{ id: 'm1', kind: 'member', name: 'Writer', status: 'done', result: 'draft' }])
+    expect(message.done).toBe(true)
+  })
+
+  it('tracks workflow steps and takes the final content from WorkflowCompleted', () => {
+    let message = applyEvent(newMessage('assistant'), { event: 'WorkflowStarted', run_id: 'wf' })
+    message = applyEvent(message, { event: 'StepStarted', run_id: 'wf', step_name: 'research' })
+    message = applyEvent(message, { event: 'StepCompleted', run_id: 'wf', step_name: 'research', content: 'notes' })
+    message = applyEvent(message, { event: 'WorkflowCompleted', run_id: 'wf', content: 'brief' })
+    expect(message.tools[0]).toMatchObject({ kind: 'step', name: 'research', status: 'done', result: 'notes' })
+    expect(message.content).toBe('brief')
+  })
+})
+
+describe('runsToMessages', () => {
+  it('rebuilds a transcript from stored runs, folding member runs away', () => {
+    const messages = runsToMessages([
+      { run_id: 'r1', run_input: 'hi', content: 'hello', status: 'COMPLETED', tools: [{ tool_name: 'calc', result: 2 }] },
+      { run_id: 'm1', parent_run_id: 'r1', run_input: 'sub', content: 'member', status: 'COMPLETED' },
+      { run_id: 'r2', run_input: 'again', content: 'partial', status: 'RUNNING' },
+    ])
+    expect(messages.map((m) => [m.role, m.content])).toEqual([
+      ['user', 'hi'],
+      ['assistant', 'hello'],
+      ['user', 'again'],
+      ['assistant', ''],
+    ])
+    expect(messages[1].tools[0]).toMatchObject({ name: 'calc', result: '2', status: 'done' })
+    expect(messages[3]).toMatchObject({ runId: 'r2', done: false })
+  })
+})
+
 describe('buildCreatePrompt', () => {
   it('states name, purpose, tools, and style', () => {
-    const prompt = buildCreatePrompt({ name: ' Scout ', purpose: 'Find news', tools: ['websearch'], style: 'terse' })
-    expect(prompt).toContain('named "Scout"')
+    const spec = { kind: 'agent' as const, name: ' Scout ', purpose: 'Find news', tools: ['websearch'], style: 'terse' }
+    const prompt = buildCreatePrompt(spec)
+    expect(prompt).toContain('new agent named "Scout"')
     expect(prompt).toContain('Purpose: Find news')
     expect(prompt).toContain('registry tools: websearch.')
     expect(prompt).toContain('Tone and output style: terse')
@@ -111,7 +161,15 @@ describe('buildCreatePrompt', () => {
   })
 
   it('says when no tools are needed', () => {
-    expect(buildCreatePrompt({ name: 'A', purpose: 'B', tools: [] })).toContain('needs no tools')
+    expect(buildCreatePrompt({ kind: 'agent', name: 'A', purpose: 'B', tools: [] })).toContain('needs no tools')
+  })
+
+  it('names team members and workflow steps by id, in order', () => {
+    const team = buildCreatePrompt({ kind: 'team', name: 'Desk', purpose: 'p', members: ['writer', 'critic'] })
+    expect(team).toContain('new team named "Desk"')
+    expect(team).toContain('Members (exact agent ids): writer, critic.')
+    const flow = buildCreatePrompt({ kind: 'workflow', name: 'Pipe', purpose: 'p', members: ['a', 'b'] })
+    expect(flow).toContain('Steps in order (exact agent ids, one step each): a, b.')
   })
 })
 
@@ -126,7 +184,16 @@ describe('proxy rules', () => {
     expect(isAllowed('POST', 'agents/x/runs/abc-123/cancel')).toBe(true)
     expect(isAllowed('POST', 'agents/x/runs/abc-123/fork')).toBe(false)
     expect(isAllowed('DELETE', 'agents')).toBe(false)
-    expect(isAllowed('GET', 'sessions')).toBe(false)
+    expect(isAllowed('GET', 'teams')).toBe(true)
+    expect(isAllowed('POST', 'workflows/w/runs')).toBe(true)
+    expect(isAllowed('POST', 'teams/t/runs/r/cancel')).toBe(true)
+    expect(isAllowed('GET', 'sessions')).toBe(true)
+    expect(isAllowed('GET', 'sessions/s1/runs')).toBe(true)
+    expect(isAllowed('DELETE', 'sessions/s1')).toBe(false)
+    expect(isAllowed('POST', 'schedules/x/trigger')).toBe(true)
+    expect(isAllowed('POST', 'schedules')).toBe(false)
+    expect(isUserScoped('sessions/s1/runs')).toBe(true)
+    expect(isUserScoped('agents')).toBe(false)
     expect(isAllowed('POST', 'agents/../config/runs')).toBe(false)
     expect(isAllowed('GET', 'components')).toBe(false)
   })

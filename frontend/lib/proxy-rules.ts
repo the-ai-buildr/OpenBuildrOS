@@ -9,13 +9,24 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 
 const SEGMENT = '[A-Za-z0-9._~-]+'
 
+const KIND = '(agents|teams|workflows)'
+
 const ALLOWED: ReadonlyArray<readonly [method: string, pattern: RegExp]> = [
   ['GET', /^health$/],
-  ['GET', /^agents$/],
   ['GET', /^palette$/],
-  ['POST', new RegExp(`^agents/${SEGMENT}/runs$`)],
-  ['POST', new RegExp(`^agents/${SEGMENT}/runs/${SEGMENT}/(continue|resume|cancel)$`)],
+  ['GET', new RegExp(`^${KIND}$`)],
+  ['POST', new RegExp(`^${KIND}/${SEGMENT}/runs$`)],
+  ['POST', new RegExp(`^${KIND}/${SEGMENT}/runs/${SEGMENT}/(continue|resume|cancel)$`)],
+  ['GET', /^sessions$/],
+  ['GET', new RegExp(`^sessions/${SEGMENT}/runs$`)],
+  ['GET', /^schedules$/],
+  ['POST', new RegExp(`^schedules/${SEGMENT}/(enable|disable|trigger)$`)],
 ]
+
+/** Paths whose results are per user: the proxy pins `user_id` on them as well as on run forms. */
+export function isUserScoped(path: string): boolean {
+  return path.startsWith('sessions')
+}
 
 /**
  * Decide whether a proxied request may pass.
