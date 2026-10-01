@@ -6,6 +6,9 @@ import remarkGfm from 'remark-gfm'
 
 import { BUILDER_ID, ENGINEER_ID, MANAGER_ID, type Channel, type Entity } from '@/lib/api'
 import type { ChatMessage, ToolCall } from '@/lib/chat'
+import { toolView } from '@/lib/toolview'
+
+import { ToolCard, toolHeadline } from './ToolCard'
 
 const REMARK_PLUGINS = [remarkGfm]
 
@@ -209,6 +212,7 @@ const STATUS_LABEL: Record<ToolCall['status'], string> = {
   running: 'running',
   done: 'done',
   error: 'failed',
+  refused: 'refused',
   'awaiting-approval': 'needs approval',
 }
 
@@ -217,15 +221,19 @@ const ACTIVITY_PREFIX: Record<NonNullable<ToolCall['kind']>, string> = { tool: '
 
 function ToolChip({ tool }: { tool: ToolCall }) {
   const kind = tool.kind ?? 'tool'
+  // Members and steps answer in prose; tool results get a card for their kind.
+  const view = kind === 'tool' && tool.result ? toolView(tool.name, tool.args, tool.result) : undefined
+  const headline = view ? toolHeadline(view) : ''
   return (
     <li>
-      <details className={`tool tool-${tool.status} activity-${kind}`}>
+      <details className={`tool tool-${tool.status} activity-${kind}`} open={tool.status === 'refused' || undefined}>
         <summary>
           {ACTIVITY_PREFIX[kind]}
           <code>{tool.name}</code> <span className="small">{STATUS_LABEL[tool.status]}</span>
+          {headline && tool.status !== 'refused' && <span className="muted small headline"> · {headline}</span>}
         </summary>
         {tool.args && <pre>{JSON.stringify(tool.args, null, 2)}</pre>}
-        {tool.result && <pre>{tool.result}</pre>}
+        {view ? <ToolCard view={view} /> : tool.result && <pre>{tool.result}</pre>}
       </details>
     </li>
   )

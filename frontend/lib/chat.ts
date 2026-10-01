@@ -7,6 +7,7 @@
 
 import { normalizeEvent } from './events'
 import type { AgentEvent } from './sse'
+import { toolView } from './toolview'
 
 /**
  * One line of activity in a reply: a tool call, a team member working on a delegated
@@ -18,7 +19,8 @@ export interface ToolCall {
   kind?: 'tool' | 'member' | 'step'
   args?: Record<string, unknown>
   result?: string
-  status: 'running' | 'done' | 'error' | 'awaiting-approval'
+  /** `refused`: the computer policy blocked the action before it ran. */
+  status: 'running' | 'done' | 'error' | 'refused' | 'awaiting-approval'
 }
 
 /** A run paused on confirmation-gated tools, waiting for the user to approve or reject. */
@@ -59,6 +61,13 @@ interface EventTool {
 function toText(value: unknown): string {
   if (value == null) return ''
   return typeof value === 'string' ? value : JSON.stringify(value)
+}
+
+/** Done, failed, or refused: a computer action can be refused by policy or fail inside a successful call. */
+function toolStatus(name: string | undefined, failed: boolean, result: string): ToolCall['status'] {
+  const view = toolView(name ?? '', undefined, result).type
+  if (failed || view === 'failed') return 'error'
+  return view === 'refused' ? 'refused' : 'done'
 }
 
 function upsertTool(tools: ToolCall[], raw: EventTool, patch: Partial<ToolCall>): ToolCall[] {
@@ -118,8 +127,9 @@ export function applyEvent(message: ChatMessage, event: AgentEvent): ChatMessage
     case 'ToolCallCompleted':
     case 'ToolCallError': {
       const raw = event.tool as EventTool
+      const result = toText(raw?.result)
       const failed = name === 'ToolCallError' || Boolean(raw?.tool_call_error)
-      const patch: Partial<ToolCall> = { status: failed ? 'error' : 'done', result: toText(raw?.result) }
+      const patch: Partial<ToolCall> = { status: toolStatus(raw?.tool_name, failed, result), result }
       return { ...message, tools: upsertTool(message.tools, raw, patch) }
     }
     case 'RunPaused': {
@@ -186,7 +196,7 @@ export function runsToMessages(runs: StoredRun[]): ChatMessage[] {
         name: tool.tool_name ?? 'tool',
         args: tool.tool_args,
         result: toText(tool.result),
-        status: tool.tool_call_error ? 'error' : 'done',
+        status: toolStatus(tool.tool_name, Boolean(tool.tool_call_error), toText(tool.result)),
       }))
       const live = run.status === 'RUNNING' || run.status === 'PENDING'
       const reply: ChatMessage = {

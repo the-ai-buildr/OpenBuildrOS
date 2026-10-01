@@ -138,7 +138,7 @@ def test_security_key_gates_the_api(client: TestClient, monkeypatch) -> None:  #
     from app.main import api_settings
 
     monkeypatch.setattr(api_settings, "os_security_key", "s3cret")
-    for path in ("/agents", "/palette"):
+    for path in ("/agents", "/palette", "/ag-ui/platform-manager/status"):
         assert client.get(path).status_code == 401
         assert client.get(path, headers={"Authorization": "Bearer wrong"}).status_code == 401
         assert client.get(path, headers={"Authorization": "Bearer s3cret"}).status_code == 200

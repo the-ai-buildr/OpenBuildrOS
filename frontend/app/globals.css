@@ -119,6 +119,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .tool-error summary span { color: var(--danger); }
 .tool-awaiting-approval summary span { color: var(--warn); }
 .tool-running summary span { color: var(--muted); }
+.tool-refused { border-color: var(--danger); }
+.tool-refused summary span { color: var(--danger); font-weight: 600; }
+.tool summary .headline { color: var(--muted); font-weight: 400; }
+.card { margin: 6px 0; }
+.card-refused { color: var(--danger); }
+.card-failed { color: var(--danger); }
+.card-page a { font-weight: 600; word-break: break-all; }
+.card-shell .command { color: var(--muted); }
+.card-shell .stderr { color: var(--danger); }
+.card-files { list-style: none; padding: 0; }
 .approval { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 16px; border: 1px solid var(--warn); border-radius: var(--radius); }
 .approval span { flex: 1; min-width: 200px; }
 .composer { display: flex; gap: 10px; padding: 14px 24px 20px; border-top: 1px solid var(--border); max-width: 900px; width: 100%; margin: 0 auto; }

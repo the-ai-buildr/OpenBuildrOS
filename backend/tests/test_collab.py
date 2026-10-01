@@ -87,3 +87,42 @@ def test_builder_schedules_a_built_agent(client: TestClient) -> None:
     schedules = client.get("/schedules").json()
     rows = schedules.get("data", schedules) if isinstance(schedules, dict) else schedules
     assert any(row.get("cron_expr", row.get("cron")) == "0 9 * * *" for row in rows), rows
+
+
+def ag_ui(client: TestClient, path: str, text: str, thread_id: str | None = None) -> list[dict[str, Any]]:
+    """POST one AG-UI run and return its events."""
+    from tests.test_api import sse_events
+
+    payload = {
+        "threadId": thread_id or str(uuid.uuid4()),
+        "runId": str(uuid.uuid4()),
+        "state": {},
+        "messages": [{"id": "m1", "role": "user", "content": text}],
+        "tools": [],
+        "context": [],
+        "forwardedProps": {},
+    }
+    with client.stream("POST", path, json=payload) as response:
+        assert response.status_code == 200, response.read()
+        return sse_events("".join(response.iter_text()))
+
+
+def test_ag_ui_serves_studio_built_agents_and_teams(client: TestClient) -> None:
+    """Agents and teams created at runtime are reachable over AG-UI without a restart."""
+    writer = new_agent(client, "Scribe")
+    events = ag_ui(client, f"/ag-ui/{writer}/agui", "hello there")
+    types = [event["type"] for event in events]
+    assert types[0] == "RUN_STARTED" and types[-1] == "RUN_FINISHED"
+    assert "Echo: hello there" in "".join(e.get("delta", "") for e in events)
+    assert client.get(f"/ag-ui/{writer}/status").json() == {"status": "available"}
+
+    envelope = build(client, f"TEAM: Room {uuid.uuid4().hex[:6]} | {writer}")
+    team_id = envelope["data"]["id"]
+    types = [event["type"] for event in ag_ui(client, f"/ag-ui/teams/{team_id}/agui", f"ASK {writer}: hi")]
+    assert types[0] == "RUN_STARTED" and types[-1] == "RUN_FINISHED"
+    assert client.get(f"/ag-ui/teams/{team_id}/status").json() == {"status": "available"}
+
+
+def test_ag_ui_unknown_agent_is_404(client: TestClient) -> None:
+    assert client.get("/ag-ui/no-such-agent/status").status_code == 404
+    assert client.get("/ag-ui/teams/no-such-team/status").status_code == 404

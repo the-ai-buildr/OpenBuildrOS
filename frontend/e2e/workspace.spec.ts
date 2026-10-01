@@ -146,14 +146,16 @@ test('a bot gets its own computer: shell, browser, live screen, and an audit tra
   await sendMessage(page, 'SHELL: echo hello-from-computer > note.txt && cat note.txt && pwd')
   const shell = lastReply(page).locator('.tool-done', { hasText: 'run_shell' })
   await expect(shell).toBeVisible()
+  await expect(shell.locator('summary')).toContainText('exit 0')
   await shell.locator('summary').click()
   await expect(shell).toContainText('hello-from-computer')
-  await expect(shell).toContainText(`/${idOf(name)}\\n`)
+  await expect(shell).toContainText(`/${idOf(name)}\n`)
   await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
 
   // The browser renders where the live screen can see it.
   await sendMessage(page, 'BROWSE: data:text/html,<title>Screen test</title><h1>On screen</h1>')
-  await expect(lastReply(page).locator('.tool-done', { hasText: 'browse' })).toBeVisible()
+  // Rendered as a page card: its title is the headline.
+  await expect(lastReply(page).locator('.tool-done', { hasText: 'browse' }).locator('summary')).toContainText('Screen test')
   await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
   const screen = panel.getByRole('img')
   await expect(screen).toBeVisible()
@@ -161,7 +163,8 @@ test('a bot gets its own computer: shell, browser, live screen, and an audit tra
 
   // The gateway refuses the deployment's own network before anything runs, and says why.
   await sendMessage(page, 'BROWSE: http://localhost:8000/health')
-  await expect(lastReply(page)).toContainText('Refused by policy')
+  const refused = lastReply(page).locator('.tool-refused', { hasText: 'browse' })
+  await expect(refused).toContainText('The computer policy refused this action (private network address)')
   const activity = page.getByTestId('computer-activity')
   await expect(activity.locator('.audit-denied').first()).toContainText('private network address')
   await expect(activity.locator('.audit-allowed', { hasText: 'run_shell' })).toBeVisible()
