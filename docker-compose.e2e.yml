@@ -1,0 +1,21 @@
+# Overlay for end-to-end tests: swaps OpenRouter for the scripted fake model.
+#   docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
+services:
+  fake-llm:
+    build:
+      context: ./backend
+      target: test
+    command: ["uvicorn", "tests.fake_llm:app", "--host", "0.0.0.0", "--port", "9999"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9999/health')"]
+      interval: 3s
+      retries: 20
+    networks: [internal]
+
+  backend:
+    environment:
+      OPENROUTER_API_KEY: e2e-fake-key
+      OPENROUTER_BASE_URL: http://fake-llm:9999
+    depends_on:
+      fake-llm:
+        condition: service_healthy

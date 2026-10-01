@@ -1,0 +1,74 @@
+# OpenBuildrOS: Postgres + Agno AgentOS backend + Next.js web UI.
+# `make up` builds and starts everything; see .env.example for configuration.
+name: openbuildros
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-openbuildr}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      POSTGRES_DB: ${DB_NAME:-openbuildr}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [internal]
+
+  backend:
+    build:
+      context: ./backend
+      target: runtime
+    image: openbuildros-backend:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      RUNTIME_ENV: ${RUNTIME_ENV:-prd}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # Empty means "use the default in backend/app/settings.py".
+      OPENROUTER_MODEL_ID: ${OPENROUTER_MODEL_ID:-}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-}
+      OS_SECURITY_KEY: ${OS_SECURITY_KEY:-}
+      DATABASE_URL: postgresql+psycopg://${DB_USER:-openbuildr}:${DB_PASSWORD}@db:5432/${DB_NAME:-openbuildr}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
+    # Published on localhost only: the UI reaches it over the internal network.
+    # Remove the mapping entirely if nothing outside the stack needs the API.
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal]
+    deploy:
+      resources:
+        limits: { cpus: "2", memory: 4g }
+
+  web:
+    build:
+      context: ./frontend
+    image: openbuildros-web:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:8000
+      OS_SECURITY_KEY: ${OS_SECURITY_KEY:-}
+      UI_USERNAME: ${UI_USERNAME:-admin}
+      UI_PASSWORD: ${UI_PASSWORD:-}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [internal]
+    deploy:
+      resources:
+        limits: { cpus: "1", memory: 1g }
+
+networks:
+  internal:
+
+volumes:
+  pgdata:
