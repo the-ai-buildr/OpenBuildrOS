@@ -49,7 +49,6 @@ os.environ.update(
         "COMPUTER_TOKEN": COMPUTER_TOKEN,
         "COMPUTER_POLICY": TEST_POLICY,
         "WORKSPACE_ROOT": os.path.join(TEST_ROOT, "workspaces"),
-        "PLAYWRIGHT_BROWSERS_PATH": os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers"),
     }
 )
 # The computer service lives in ../computer; the backend tests run it in shared mode.
